@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 glutin = "0.29.1"
 gl = "0.14.0"
+rusttype = "0.9.3"
 
