@@ -1,4 +1,4 @@
-use std::{ffi::c_void, ptr};
+use std::ptr;
 
 use gl::types::{GLint, GLuint, GLsizeiptr, GLsizei, GLvoid, GLenum, GLchar};
 use glutin::{event_loop::{EventLoop, ControlFlow}, window::WindowBuilder, ContextBuilder, GlRequest, Api, event::{Event, WindowEvent}};
@@ -24,9 +24,7 @@ const FRAGMENT_SHADER_SOURCE: &str = r#"
 #version 330 core
 
 in vec2 frag_tex_coords;
-
 uniform sampler2D tex;
-
 out vec4 frag_color;
 
 void main()
@@ -35,13 +33,47 @@ void main()
 }
 "#;
 
+fn check_errors() {
+    unsafe {
+        loop {
+            let error = gl::GetError();
+            if error != gl::NO_ERROR {
+                println!("OpenGL error: {}", error);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
 fn compile_shader(source: &str, shader_type: GLenum) -> GLuint {
     unsafe {
         let shader = gl::CreateShader(shader_type);
         gl::ShaderSource(shader, 1, &(source.as_ptr() as *const _), &(source.len() as GLint));
         gl::CompileShader(shader);
 
-        // Check for shader compilation errors (not shown here for brevity)
+        check_errors();
+        // CHECK ERRS
+        let mut success: GLint = 0;
+        gl::GetShaderiv(shader, gl::COMPILE_STATUS, &mut success);
+        if success == 1 {
+            ()
+        } else {
+            let mut error_log_size: GLint = 0;
+            gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut error_log_size);
+            let mut error_log: Vec<u8> = Vec::with_capacity(error_log_size as usize);
+            gl::GetShaderInfoLog(
+                shader,
+                error_log_size,
+                &mut error_log_size,
+                error_log.as_mut_ptr() as *mut _,
+            );
+
+            error_log.set_len(error_log_size as usize);
+            let log = String::from_utf8(error_log).expect("failure");
+            eprintln!("{}", log);
+        }
+        // CHECK ERRS
 
         shader
     }
@@ -54,12 +86,22 @@ fn link_program(vertex_shader: GLuint, fragment_shader: GLuint) -> GLuint {
         gl::AttachShader(program, fragment_shader);
         gl::LinkProgram(program);
 
-        // Check for program linking errors (not shown here for brevity)
+        check_errors();
 
         gl::DeleteShader(vertex_shader);
         gl::DeleteShader(fragment_shader);
 
         program
+    }
+}
+
+fn terminal_render(width: usize, height: usize, buffer: &[u8]) {
+    for y in 0..height {
+        for x in 0..width {
+            let char = [" ", ":", "|", "O", "W"][(buffer[y * width + x] / 52) as usize];
+            print!("{char}{char}");
+        }
+        print!("\n");
     }
 }
 
@@ -69,36 +111,31 @@ fn main() {
     let glyph = font.glyph('A');
     let glyph = glyph.scaled(Scale::uniform(16.0));
 
-    let advance_width = glyph.h_metrics().advance_width;
-    let left_side_bearing = glyph.h_metrics().left_side_bearing;
+    let _advance_width = glyph.h_metrics().advance_width;
+    let _left_side_bearing = glyph.h_metrics().left_side_bearing;
 
-    // Adjust the glyph position so min is (0, 0)
     let glyph = glyph.positioned(point(0.0, 0.0));
     let bbox = glyph.pixel_bounding_box().unwrap();
-    let offset_x = bbox.min.x as f32;
-    let offset_y = bbox.min.y as f32;
-    let glyph = glyph.into_unpositioned();
-    let glyph = glyph.positioned(point(-offset_x, -offset_y));
 
-    let bbox = glyph.pixel_bounding_box().unwrap();
-    let width = bbox.width() as u32;
-    let height = bbox.height() as u32;
+    let width = bbox.width() as usize;
+    let height = bbox.height() as usize;
 
     // create bitmap to store the glyph's pixel data
-    let mut buffer = vec![0u8; (width * height) as usize];
+    let mut buffer = vec![0u8; width * height];
 
     glyph.draw(|x, y, v| {
-        let x = x + bbox.min.x as u32;
-        let y = y + bbox.min.y as u32;
-        println!("{} * {} + {}", y, width, x);
-        let index = (y * width + x) as usize;
+        let x = x as usize;
+        let y = y as usize;
+        let index = y * width + x;
         buffer[index] = (v * 255.0) as u8; // Store the alpha value in the buffer
     });
+
+    terminal_render(width, height, &buffer);
 
     run(width, height, buffer);
 }
 
-fn run(width: u32, height: u32, bitmap: Vec<u8>) {
+fn run(width: usize, height: usize, bitmap: Vec<u8>) {
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new().with_title("My Boy");
 
@@ -113,7 +150,6 @@ fn run(width: u32, height: u32, bitmap: Vec<u8>) {
             .expect("Failed to make context current")
     };
     gl::load_with(|ptr| gl_context.get_proc_address(ptr) as *const _);
-
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -130,6 +166,12 @@ fn run(width: u32, height: u32, bitmap: Vec<u8>) {
                 _ => (),
             },
             Event::RedrawRequested(_) => {
+                // set background color
+                unsafe {
+                    gl::ClearColor(0.0, 0.0, 1.0, 1.0);
+                    gl::Clear(gl::COLOR_BUFFER_BIT);
+                }
+
                 // generate an id for texture
                 let mut texture_id: GLuint = 0;
                 unsafe {
@@ -140,10 +182,8 @@ fn run(width: u32, height: u32, bitmap: Vec<u8>) {
                     gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::REPEAT as GLint);
                     gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as GLint);
                     gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as GLint);
-                }
 
-                // put bitmap on texture
-                unsafe {
+                    // put bitmap on texture
                     gl::TexImage2D(
                         gl::TEXTURE_2D,
                         0, // Mipmap level
@@ -153,7 +193,7 @@ fn run(width: u32, height: u32, bitmap: Vec<u8>) {
                         0, // Border (always 0)
                         gl::RGBA, // Format of the pixel data
                         gl::UNSIGNED_BYTE, // Type of the pixel data
-                        bitmap.as_ptr() as *const c_void, // Pointer to the pixel data
+                        bitmap.as_ptr() as *const GLvoid, // Pointer to the pixel data
                     );
                     gl::GenerateMipmap(gl::TEXTURE_2D);
                 }
@@ -171,9 +211,6 @@ fn run(width: u32, height: u32, bitmap: Vec<u8>) {
                 let mut vao: GLuint = 0;
                 unsafe {
                     gl::GenBuffers(1, &mut vbo);
-                    gl::GenVertexArrays(1, &mut vao);
-
-                    gl::BindVertexArray(vao);
                     gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
                     gl::BufferData(
                         gl::ARRAY_BUFFER,
@@ -182,6 +219,9 @@ fn run(width: u32, height: u32, bitmap: Vec<u8>) {
                         gl::STATIC_DRAW,
                     );
 
+                    gl::GenVertexArrays(1, &mut vao);
+                    gl::BindVertexArray(vao);
+
                     // Set the vertex attribute pointers
                     let stride = (4 * std::mem::size_of::<f32>()) as GLsizei;
                     gl::VertexAttribPointer(0, 2, gl::FLOAT, gl::FALSE, stride, ptr::null());
@@ -189,8 +229,8 @@ fn run(width: u32, height: u32, bitmap: Vec<u8>) {
                     gl::VertexAttribPointer(1, 2, gl::FLOAT, gl::FALSE, stride, (2 * std::mem::size_of::<f32>()) as *const GLvoid);
                     gl::EnableVertexAttribArray(1);
 
-                    gl::BindVertexArray(0);
-                    gl::BindBuffer(gl::ARRAY_BUFFER, 0);
+                    // gl::BindVertexArray(0);
+                    // gl::BindBuffer(gl::ARRAY_BUFFER, 0);
                 }
 
                 // Bind and activate the texture
@@ -212,10 +252,6 @@ fn run(width: u32, height: u32, bitmap: Vec<u8>) {
                     gl::UseProgram(0);
                 }
 
-                // unsafe {
-                //     gl::ClearColor(0.0, 0.0, 1.0, 1.0);
-                //     gl::Clear(gl::COLOR_BUFFER_BIT);
-                // }
                 gl_context.swap_buffers().unwrap();
             }
             _ => (),
