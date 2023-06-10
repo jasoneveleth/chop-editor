@@ -10,11 +10,11 @@ use pager::render::Display;
 fn main() {
     let font_data = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
     let font = Font::try_from_bytes(font_data).expect("Error loading font");
-    let bm = GlyphAtlas::from_glyph(font, 'A', 50.0);
+    let atlas = GlyphAtlas::from_font(font, 40.0);
 
-    terminal_render(bm.width, bm.height, &bm.buffer);
+    terminal_render(atlas.width, atlas.height, &atlas.buffer);
 
-    run(bm);
+    run(atlas);
 }
 
 fn run(glyph_atlas: GlyphAtlas) {
