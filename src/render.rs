@@ -7,52 +7,67 @@ use rusttype::Font;
 use glium::Surface;
 use glium::implement_vertex;
 use glium::uniform;
-
 use glium::{Texture2d, Program, VertexBuffer, IndexBuffer};
 use glium::index::PrimitiveType;
 
+use log::debug;
+
+use im::Vector;
+
 pub fn terminal_render(width: usize, height: usize, buffer: &[u8]) {
-    println!("red channel:");
-    let chunk_size = 176/2; // remember we're printing double
+    let palette = [" ", ":", "|", "O", "W"];
+    // overshoot non divisors so we don't get index error later
+    let byte_val_divisor = 256/palette.len() + (256 % palette.len() != 0) as usize;
+
+    debug!("red channel:");
+    let ncols = 134;
+    // remember we're printing double
+    let chunk_size = ncols/2;
     let num_chunk = width/chunk_size;
     for z in 0..num_chunk {
         for y in (0..height).rev() {
+            let mut str = "".to_string();
             for x in z*chunk_size..(z+1)*chunk_size {
                 let r = buffer[(y * width + x)*4];
                 let _g = buffer[(y * width + x)*4 + 1];
                 let _b = buffer[(y * width + x)*4 + 2];
                 let _a = buffer[(y * width + x)*4 + 3];
-                let char = [" ", ":", "|", "O", "W"][(r / 52) as usize];
-                print!("{char}{char}");
+                let char = palette[r as usize / byte_val_divisor];
+                str += char;
+                str += char;
             }
-            print!("\n");
+            debug!("{str}");
         }
     }
     for y in (0..height).rev() {
+        let mut str = "".to_string();
         for x in num_chunk*chunk_size..width {
             let r = buffer[(y * width + x)*4];
             let _g = buffer[(y * width + x)*4 + 1];
             let _b = buffer[(y * width + x)*4 + 2];
             let _a = buffer[(y * width + x)*4 + 3];
-            let char = [" ", ":", "|", "O", "W"][(r / 52) as usize];
-            print!("{char}{char}");
+            let char = palette[r as usize / byte_val_divisor];
+            str += char;
+            str += char;
         }
-        print!("\n");
+        debug!("{str}");
     }
 }
 
-struct GlyphData {
+pub struct GlyphData {
     width: usize,
     height: usize,
-    position_in_atlas: [[f32; 2]; 4],
+    pos: [[f32; 2]; 4],
 }
+
+pub type GlyphInfo = HashMap<char, GlyphData>;
 
 // We can get a bitmap from a character and a font
 pub struct GlyphAtlas {
     pub width: usize,
     pub height: usize,
     pub buffer: Vec<u8>,
-    map: HashMap<char, GlyphData>,
+    map: GlyphInfo,
 }
 
 //         position.min
@@ -139,7 +154,7 @@ impl GlyphAtlas {
             let bottom_right = rusttype::point(curr_x + glyph_width, height_pixels - 1);
             let dims = rusttype::Rect { min: top_left, max: bottom_right};
 
-            map.insert(c, GlyphData{width: glyph_width, height: glyph_height, position_in_atlas: dims2pos(width_pixels, height_pixels, dims)});
+            map.insert(c, GlyphData{width: glyph_width, height: glyph_height, pos: dims2pos(width_pixels, height_pixels, dims)});
 
             curr_x += glyph_width+1;
         }
@@ -174,7 +189,7 @@ const FRAGMENT_SHADER_SOURCE: &str = r#"
 "#;
 
 #[derive(Copy, Clone)]
-struct Vertex {
+pub struct Vertex {
     position: [f32; 2],
     tex_coords: [f32; 2],
 }
@@ -183,56 +198,88 @@ implement_vertex!(Vertex, position, tex_coords);
 
 pub struct Display {
     glium_display: glium::Display,
-    vertex_buffer: VertexBuffer<Vertex>,
-    index_buffer: IndexBuffer<u32>,
     program: Program,
     texture: Texture2d,
+    glyph_info: GlyphInfo,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+struct Point<T> {
+    x: T,
+    y: T,
+}
+
+impl<T: std::ops::Add<Output = T>> std::ops::Add for Point<T> {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {x: self.x + rhs.x, y: self.y + rhs.y}
+    }
 }
 
 impl Display {
-    pub fn new(event_loop: &glutin::event_loop::EventLoop<()>, glyph_atlas: GlyphAtlas, wb: glutin::window::WindowBuilder) -> Self {
-        let cb = glutin::ContextBuilder::new();
-        let window = cb.build_windowed(wb, event_loop).unwrap();
+    pub fn new(glyph_atlas: GlyphAtlas, window: glutin::WindowedContext<glutin::NotCurrent>) -> Self {
         let display = glium::Display::from_gl_window(window).unwrap();
 
         let raw_image = glium::texture::RawImage2d::from_raw_rgba(glyph_atlas.buffer, (glyph_atlas.width as u32, glyph_atlas.height as u32));
-
-        // Create a texture from the bitmap data
         let texture = Texture2d::new(&display, raw_image).unwrap();
-
-        // Compile the shaders and create the program
         let program = Program::from_source(&display, VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE, None).unwrap();
 
-        let window_size = display.gl_window().window().inner_size();
-        let glyph_data = glyph_atlas.map.get(&'B').unwrap();
-
-        let top_left = rusttype::point(-0.2, 0.7);
-        let new_width = (glyph_data.width as f32 / window_size.width as f32) * 2.0;
-        let new_height = (glyph_data.height as f32 / window_size.height as f32) * 2.0;
-
-        let tex_coords = glyph_data.position_in_atlas;
-
-        // Create a vertex buffer for the quad
-        let vertex_buffer = VertexBuffer::new(&display, &[
-            Vertex { position: [top_left.x, top_left.y - new_height], tex_coords: tex_coords[0] },
-            Vertex { position: [top_left.x, top_left.y], tex_coords: tex_coords[1] },
-            Vertex { position: [top_left.x + new_width, top_left.y], tex_coords: tex_coords[2] },
-            Vertex { position: [top_left.x + new_width, top_left.y - new_height], tex_coords: tex_coords[3] },
-        ]).unwrap();
-
-        // Create an index buffer for the quad
-        let index_buffer = IndexBuffer::new(&display, PrimitiveType::TriangleStrip, &[1u32, 2u32, 0u32, 3u32]).unwrap();
-        Self {glium_display: display, vertex_buffer, index_buffer, program, texture}
+        Self {glyph_info: glyph_atlas.map, glium_display: display, program, texture}
     }
 
-    pub fn draw(&self) {
+    pub fn add_text(&self, text: &str) -> (Vector<Vertex>, Vector<u32>) {
+        let window_size = self.glium_display.gl_window().window().inner_size();
+
+        let mut vertices = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+
+        let start = Point{x: -0.2, y: 0.7};
+        let incr = Point{x: 0.08, y: 0.};
+        let mut curr = start;
+
+        for c in text.chars() {
+            let glyph_data = self.glyph_info.get(&c).unwrap();
+            curr = curr + incr;
+            let top_left = curr;
+            let new_width = (glyph_data.width as f32 / window_size.width as f32) * 2.0;
+            let new_height = (glyph_data.height as f32 / window_size.height as f32) * 2.0;
+
+            let index = vertices.len();
+
+            vertices.push(Vertex { position: [top_left.x, top_left.y - new_height], tex_coords: glyph_data.pos[0] });
+            vertices.push(Vertex { position: [top_left.x, top_left.y], tex_coords: glyph_data.pos[1] });
+            vertices.push(Vertex { position: [top_left.x + new_width, top_left.y], tex_coords: glyph_data.pos[2] });
+            vertices.push(Vertex { position: [top_left.x + new_width, top_left.y - new_height], tex_coords: glyph_data.pos[3] });
+
+            // a list of triangles of vertex indices
+            // triangle 1
+            indices.push((index + 1) as u32);
+            indices.push((index + 2) as u32);
+            indices.push(index as u32);
+            // triangle 2
+            indices.push(index as u32);
+            indices.push((index + 2) as u32);
+            indices.push((index + 3) as u32);
+        }
+        (Vector::from(vertices), Vector::from(indices))
+    }
+
+    pub fn draw(&self, vertex_list: Vector<Vertex>, triangle_list: Vector<u32>) {
+        // all the vertices we want to pass to the GPU
+        let arr: Vec<Vertex> = vertex_list.iter().copied().collect();
+        let vertex_buffer = VertexBuffer::new(&self.glium_display, &arr[..]).unwrap();
+
+        // a list of triangles of vertex indices
+        let arr: Vec<u32> = triangle_list.iter().copied().collect();
+        let index_buffer = IndexBuffer::new(&self.glium_display, PrimitiveType::TrianglesList, &arr[..]).unwrap();
+
         let mut target = self.glium_display.draw();
         target.clear_color(0.0, 0.0, 0.0, 1.0);
 
         // Bind the vertex buffer, index buffer, texture, and program
         target.draw(
-            &self.vertex_buffer,
-            &self.index_buffer,
+            &vertex_buffer,
+            &index_buffer,
             &self.program,
             &uniform! { tex: &self.texture },
             &Default::default(),
