@@ -2,8 +2,8 @@ use std::fs::read_to_string;
 
 use rusttype::Font; 
 use glutin::dpi::{LogicalSize, PhysicalPosition};
-use glutin::event::WindowEvent::{CloseRequested, MouseWheel};
-use glutin::event::{Event, MouseScrollDelta};
+use glutin::event::WindowEvent::{CloseRequested, MouseWheel, KeyboardInput, ModifiersChanged};
+use glutin::event::{Event, MouseScrollDelta, VirtualKeyCode, ModifiersState};
 use log::info;
 
 // use pager::render::terminal_render;
@@ -38,6 +38,8 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, text: Vec<S
     let display = Display::new(glyph_atlas, window);
     let mut scroll_y = 0.0;
 
+    let mut modifier_state = ModifiersState::default();
+
     event_loop.run(move |ev, _, control_flow| {
         let next_frame_time = std::time::Instant::now() + std::time::Duration::from_nanos(16_666_667); // 1/60 of a second
         *control_flow = glutin::event_loop::ControlFlow::WaitUntil(next_frame_time);
@@ -70,6 +72,19 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, text: Vec<S
                             display.draw(verts, triangles);
                         },
                     }
+                },
+                KeyboardInput { input, .. } => {
+                    if let Some(VirtualKeyCode::W) = input.virtual_keycode {
+                        if modifier_state.contains(ModifiersState::LOGO) {
+                            // Cmd+W combination pressed
+                            info!("close requested");
+                            *control_flow = glutin::event_loop::ControlFlow::Exit;
+                            return;
+                        }
+                    }
+                },
+                ModifiersChanged(state) => {
+                    modifier_state = state;
                 },
                 _ => (),
             },
