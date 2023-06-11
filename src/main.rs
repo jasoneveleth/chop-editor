@@ -1,3 +1,5 @@
+use std::fs::read_to_string;
+
 use rusttype::Font; 
 use glutin::dpi::{LogicalSize, PhysicalPosition};
 use glutin::event::WindowEvent::{CloseRequested, MouseWheel};
@@ -16,12 +18,15 @@ fn main() {
     let size = 150.0;
     let atlas = GlyphAtlas::from_font(&font, size);
 
+    let file_path = "/tmp/test.txt";
+    let text = read_to_string(file_path).unwrap().lines().map(String::from).collect();
+
     // terminal_render(atlas.width, atlas.height, &atlas.buffer);
 
-    run(atlas, font, size);
+    run(atlas, font, size, text);
 }
 
-fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32) {
+fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, text: Vec<String>) {
     let size = LogicalSize {width: 800, height: 600};
     let title = "My Boi";
 
@@ -54,17 +59,14 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32) {
 
                             // BAD BAD copying code (should just redraw)
                             let scale = rusttype::Scale::uniform(font_size);
-                            let line_num = 0;
-                            let (verts1, triangles1) = display.add_text(&font, scale, &format!("yeehaw"), line_num, 0, scroll_y);
-                            let (verts2, triangles2) = display.add_text(&font, scale, &format!("next line"), 1, verts1.len(), scroll_y);
-
                             let mut verts = Vec::new();
-                            verts.extend(verts1);
-                            verts.extend(verts2);
-
                             let mut triangles = Vec::new();
-                            triangles.extend(triangles1);
-                            triangles.extend(triangles2);
+                            for (i, line) in text.iter().enumerate() {
+                                let (v, t) = display.add_text(&font, scale, &line, i, verts.len(), scroll_y);
+                                verts.extend(v);
+                                triangles.extend(t);
+                            }
+
                             display.draw(verts, triangles);
                         },
                     }
@@ -74,17 +76,15 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32) {
             Event::RedrawRequested(_window_id) => {
                 info!("redraw requested");
                 let scale = rusttype::Scale::uniform(font_size);
-                let line_num = 0;
-                let (verts1, triangles1) = display.add_text(&font, scale, &format!("yeehaw"), line_num, 0, scroll_y);
-                let (verts2, triangles2) = display.add_text(&font, scale, &format!("next line"), 1, verts1.len(), scroll_y);
 
                 let mut verts = Vec::new();
-                verts.extend(verts1);
-                verts.extend(verts2);
-
                 let mut triangles = Vec::new();
-                triangles.extend(triangles1);
-                triangles.extend(triangles2);
+                for (i, line) in text.iter().enumerate() {
+                    let (v, t) = display.add_text(&font, scale, &line, i, verts.len(), scroll_y);
+                    verts.extend(v);
+                    triangles.extend(t);
+                }
+
                 display.draw(verts, triangles);
             }
             _ => (),

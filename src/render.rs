@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use log::error;
-use log::info;
 use log::warn;
 use rusttype::Scale; 
 use rusttype::point;
@@ -313,14 +312,8 @@ impl Display {
         // // work out the layout size of fully rendered text
         // let glyphs_height = (v_metrics.ascent - v_metrics.descent).ceil() as u32;
         // let glyphs_width = {
-        //     let min_x = glyphs
-        //         .first()
-        //         .map(|g| g.pixel_bounding_box().unwrap().min.x)
-        //         .unwrap();
-        //     let max_x = glyphs
-        //         .last()
-        //         .map(|g| g.pixel_bounding_box().unwrap().max.x)
-        //         .unwrap();
+        //     let min_x = glyphs.first().map(|g| g.pixel_bounding_box().unwrap().min.x).unwrap();
+        //     let max_x = glyphs.last().map(|g| g.pixel_bounding_box().unwrap().max.x).unwrap();
         //     (max_x - min_x) as u32
         // };
 
