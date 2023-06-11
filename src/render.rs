@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use log::warn;
 use rusttype::Scale; 
 use rusttype::point;
 use rusttype::Font; 
@@ -9,30 +10,42 @@ use glium::implement_vertex;
 use glium::uniform;
 use glium::{Texture2d, Program, VertexBuffer, IndexBuffer};
 use glium::index::PrimitiveType;
+use glium::Blend;
+use std::ops::Add;
 
 use log::debug;
 
 use im::Vector;
+use term_size;
+
+fn calc_chunk_size(default_val: usize) -> usize {
+    let log_prefix_size = 43;
+
+    let cols = match term_size::dimensions() {
+        Some((w, _)) => w,
+        None => default_val
+    };
+    // remember we're printing double
+    (cols - log_prefix_size)/2
+}
 
 pub fn terminal_render(width: usize, height: usize, buffer: &[u8]) {
     let palette = [" ", ":", "|", "O", "W"];
     // overshoot non divisors so we don't get index error later
     let byte_val_divisor = 256/palette.len() + (256 % palette.len() != 0) as usize;
 
-    debug!("red channel:");
-    let ncols = 134;
-    // remember we're printing double
-    let chunk_size = ncols/2;
+    debug!("alpha channel:");
+    let chunk_size = calc_chunk_size(176);
     let num_chunk = width/chunk_size;
     for z in 0..num_chunk {
         for y in (0..height).rev() {
             let mut str = "".to_string();
             for x in z*chunk_size..(z+1)*chunk_size {
-                let r = buffer[(y * width + x)*4];
+                let _r = buffer[(y * width + x)*4];
                 let _g = buffer[(y * width + x)*4 + 1];
                 let _b = buffer[(y * width + x)*4 + 2];
-                let _a = buffer[(y * width + x)*4 + 3];
-                let char = palette[r as usize / byte_val_divisor];
+                let a = buffer[(y * width + x)*4 + 3];
+                let char = palette[a as usize / byte_val_divisor];
                 str += char;
                 str += char;
             }
@@ -42,11 +55,11 @@ pub fn terminal_render(width: usize, height: usize, buffer: &[u8]) {
     for y in (0..height).rev() {
         let mut str = "".to_string();
         for x in num_chunk*chunk_size..width {
-            let r = buffer[(y * width + x)*4];
+            let _r = buffer[(y * width + x)*4];
             let _g = buffer[(y * width + x)*4 + 1];
             let _b = buffer[(y * width + x)*4 + 2];
-            let _a = buffer[(y * width + x)*4 + 3];
-            let char = palette[r as usize / byte_val_divisor];
+            let a = buffer[(y * width + x)*4 + 3];
+            let char = palette[a as usize / byte_val_divisor];
             str += char;
             str += char;
         }
@@ -57,7 +70,7 @@ pub fn terminal_render(width: usize, height: usize, buffer: &[u8]) {
 pub struct GlyphData {
     width: usize,
     height: usize,
-    pos: [[f32; 2]; 4],
+    tex_pos: [[f32; 2]; 4],
 }
 
 pub type GlyphInfo = HashMap<char, GlyphData>;
@@ -103,11 +116,13 @@ fn dims2pos(width_pixels: usize, height_pixels: usize, position: rusttype::Rect<
 }
 
 impl GlyphAtlas {
-    pub fn from_font(font: Font, scale: f32) -> Self {
+    pub fn from_font(font: &Font, font_size: f32) -> Self {
+        let scale = Scale::uniform(font_size);
+
         let all_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ`1234567890-=~!@#$%^&*()_+[]\\{}|;':\",./<>?";
         let all_glyphs: Vec<rusttype::PositionedGlyph> = all_chars.chars().map(|c| {
             let glyph = font.glyph(c);
-            let glyph = glyph.scaled(Scale::uniform(scale));
+            let glyph = glyph.scaled(scale);
             glyph.positioned(point(0.0, 0.0))
         }).collect();
 
@@ -142,19 +157,19 @@ impl GlyphAtlas {
                 let index = (y * width_pixels + x) * 4;
 
                 let v = (v * 255.0) as u8;
-                let (r, g, b, a) = (v, v, v, 1);
 
-                buffer[index] = r;
-                buffer[index + 1] = g;
-                buffer[index + 2] = b;
-                buffer[index + 3] = a;
+                buffer[index] = 255;
+                buffer[index + 1] = 255;
+                buffer[index + 2] = 255;
+                buffer[index + 3] = v;
             });
 
             let top_left = rusttype::point(curr_x, height_pixels - glyph_height);
             let bottom_right = rusttype::point(curr_x + glyph_width, height_pixels - 1);
             let dims = rusttype::Rect { min: top_left, max: bottom_right};
 
-            map.insert(c, GlyphData{width: glyph_width, height: glyph_height, pos: dims2pos(width_pixels, height_pixels, dims)});
+            let tex_pos = dims2pos(width_pixels, height_pixels, dims);
+            map.insert(c, GlyphData{width: glyph_width, height: glyph_height, tex_pos});
 
             curr_x += glyph_width+1;
         }
@@ -209,7 +224,7 @@ struct Point<T> {
     y: T,
 }
 
-impl<T: std::ops::Add<Output = T>> std::ops::Add for Point<T> {
+impl<T: Add<Output = T>> Add for Point<T> {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
         Self {x: self.x + rhs.x, y: self.y + rhs.y}
@@ -227,29 +242,61 @@ impl Display {
         Self {glyph_info: glyph_atlas.map, glium_display: display, program, texture}
     }
 
-    pub fn add_text(&self, text: &str) -> (Vector<Vertex>, Vector<u32>) {
+    pub fn add_text(&self, font: &Font, scale: Scale, text: &str) -> (Vector<Vertex>, Vector<u32>) {
         let window_size = self.glium_display.gl_window().window().inner_size();
+
+        let v_metrics = font.v_metrics(scale);
+        let padding = 0.;
+        let glyphs: Vec<_> = font.layout(text, scale, point(padding, padding + v_metrics.ascent)).collect();
+
+        // // work out the layout size of fully rendered text
+        // let glyphs_height = (v_metrics.ascent - v_metrics.descent).ceil() as u32;
+        // let glyphs_width = {
+        //     let min_x = glyphs
+        //         .first()
+        //         .map(|g| g.pixel_bounding_box().unwrap().min.x)
+        //         .unwrap();
+        //     let max_x = glyphs
+        //         .last()
+        //         .map(|g| g.pixel_bounding_box().unwrap().max.x)
+        //         .unwrap();
+        //     (max_x - min_x) as u32
+        // };
 
         let mut vertices = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
 
-        let start = Point{x: -0.2, y: 0.7};
-        let incr = Point{x: 0.08, y: 0.};
-        let mut curr = start;
+        for (glyph, c) in glyphs.iter().zip(text.chars()) {
+            let bbox = glyph.pixel_bounding_box().unwrap();
 
-        for c in text.chars() {
+            let x = (bbox.min.x as f32 / window_size.width as f32) * 2.0;
+            let y = ((window_size.height as f32 - bbox.min.y as f32) / window_size.height as f32) * 2.0;
+            let top_left = rusttype::point(x-1., y-1.);
+
+            if top_left.x <= -1. {
+                warn!("top left of glyph is rendered off (left) screen")
+            }
+            if top_left.y <= -1. {
+                warn!("top left of glyph is rendered off (bottom) screen")
+            }
+            if top_left.x >= 1. {
+                warn!("top left of glyph is rendered off (right) screen")
+            }
+            if top_left.y >= 1. {
+                warn!("top left of glyph is rendered off (top) screen")
+            }
+
             let glyph_data = self.glyph_info.get(&c).unwrap();
-            curr = curr + incr;
-            let top_left = curr;
+
             let new_width = (glyph_data.width as f32 / window_size.width as f32) * 2.0;
             let new_height = (glyph_data.height as f32 / window_size.height as f32) * 2.0;
 
             let index = vertices.len();
 
-            vertices.push(Vertex { position: [top_left.x, top_left.y - new_height], tex_coords: glyph_data.pos[0] });
-            vertices.push(Vertex { position: [top_left.x, top_left.y], tex_coords: glyph_data.pos[1] });
-            vertices.push(Vertex { position: [top_left.x + new_width, top_left.y], tex_coords: glyph_data.pos[2] });
-            vertices.push(Vertex { position: [top_left.x + new_width, top_left.y - new_height], tex_coords: glyph_data.pos[3] });
+            vertices.push(Vertex { position: [top_left.x, top_left.y - new_height], tex_coords: glyph_data.tex_pos[0] });
+            vertices.push(Vertex { position: [top_left.x, top_left.y], tex_coords: glyph_data.tex_pos[1] });
+            vertices.push(Vertex { position: [top_left.x + new_width, top_left.y], tex_coords: glyph_data.tex_pos[2] });
+            vertices.push(Vertex { position: [top_left.x + new_width, top_left.y - new_height], tex_coords: glyph_data.tex_pos[3] });
 
             // a list of triangles of vertex indices
             // triangle 1
@@ -276,13 +323,18 @@ impl Display {
         let mut target = self.glium_display.draw();
         target.clear_color(0.0, 0.0, 0.0, 1.0);
 
+        let draw_parameters  = glium::DrawParameters {
+            blend: Blend::alpha_blending(),
+            .. Default::default()
+        };
+
         // Bind the vertex buffer, index buffer, texture, and program
         target.draw(
             &vertex_buffer,
             &index_buffer,
             &self.program,
             &uniform! { tex: &self.texture },
-            &Default::default(),
+            &draw_parameters,
         ).unwrap();
 
         // Finish the frame

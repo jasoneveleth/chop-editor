@@ -1,10 +1,11 @@
 use rusttype::Font; 
 use glutin::dpi::LogicalSize;
 use glutin::event::WindowEvent::CloseRequested;
+use glutin::event::WindowEvent::Resized;
 use glutin::event::Event;
 use log::info;
 
-use pager::render::terminal_render;
+// use pager::render::terminal_render;
 use pager::render::GlyphAtlas;
 use pager::render::Display;
 
@@ -13,14 +14,15 @@ fn main() {
 
     let font_data = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
     let font = Font::try_from_bytes(font_data).expect("Error loading font");
-    let atlas = GlyphAtlas::from_font(font, 40.0);
+    let size = 250.0;
+    let atlas = GlyphAtlas::from_font(&font, size);
 
-    terminal_render(atlas.width, atlas.height, &atlas.buffer);
+    // terminal_render(atlas.width, atlas.height, &atlas.buffer);
 
-    run(atlas);
+    run(atlas, font, size);
 }
 
-fn run(glyph_atlas: GlyphAtlas) {
+fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32) {
     let size = LogicalSize {width: 800, height: 600};
     let title = "My Boi";
 
@@ -37,6 +39,7 @@ fn run(glyph_atlas: GlyphAtlas) {
         match ev {
             Event::WindowEvent { event, .. } => match event {
                 CloseRequested => {
+                    info!("close requested");
                     *control_flow = glutin::event_loop::ControlFlow::Exit;
                     return;
                 },
@@ -44,11 +47,11 @@ fn run(glyph_atlas: GlyphAtlas) {
             },
             Event::RedrawRequested(_window_id) => {
                 info!("redraw requested");
-                let (v, i) = display.add_text("yeehaw");
-                display.draw(v, i);
+                let scale = rusttype::Scale::uniform(font_size);
+                let (verts, triangles) = display.add_text(&font, scale, &format!("yeehaw"));
+                display.draw(verts, triangles);
             }
             _ => (),
         }
     });
-
 }
