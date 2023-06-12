@@ -128,7 +128,7 @@ fn is_variation_selector(c: &char) -> bool {
 }
 
 impl GlyphAtlas {
-    pub fn from_font(font: &Font, font_size: f32) -> Self {
+    pub fn from_font(font: &Font, font_size: f32, font_color: (u8, u8, u8)) -> Self {
         let scale = Scale::uniform(font_size);
 
         // let all_chars = "ab❤️";
@@ -190,16 +190,14 @@ impl GlyphAtlas {
 
                 glyph.draw(|x, y, v| {
                     let x = curr_x + x as usize;
-
                     let y = glyph_height - y as usize - 1; // flip y over
-
                     let index = (y * width_pixels + x) * 4;
 
                     let v = (v * 255.0) as u8;
-
-                    buffer[index] = 255;
-                    buffer[index + 1] = 255;
-                    buffer[index + 2] = 255;
+                    let (r, g, b) = font_color;
+                    buffer[index] = r;
+                    buffer[index + 1] = g;
+                    buffer[index + 2] = b;
                     buffer[index + 3] = v;
                 });
 
@@ -275,11 +273,11 @@ impl<T: Add<Output = T>> Add for Point<T> {
 
 impl Display {
     pub fn new(glyph_atlas: GlyphAtlas, window: glutin::WindowedContext<glutin::NotCurrent>) -> Self {
-        let display = glium::Display::from_gl_window(window).unwrap();
+        let display = glium::Display::from_gl_window(window).expect("unable to create display");
 
         let raw_image = glium::texture::RawImage2d::from_raw_rgba(glyph_atlas.buffer, (glyph_atlas.width as u32, glyph_atlas.height as u32));
-        let texture = Texture2d::new(&display, raw_image).unwrap();
-        let program = Program::from_source(&display, VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE, None).unwrap();
+        let texture = Texture2d::new(&display, raw_image).expect("unable to create 2d texture");
+        let program = Program::from_source(&display, VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE, None).expect("unable to create program");
 
         Self {glyph_info: glyph_atlas.map, glium_display: display, program, texture}
     }
@@ -374,15 +372,25 @@ impl Display {
         (vertices, indices)
     }
 
-    pub fn draw(&self, vertex_list: Vec<Vertex>, triangle_list: Vec<u32>) {
+    pub fn draw(&self, font_size: f32, font: &Font, scroll_y: f32, text: &Vec<String>, bg_color: (f32, f32, f32, f32)) -> Result<(), Box<dyn std::error::Error>> {
+        let scale = rusttype::Scale::uniform(font_size);
+
+        let mut vertex_list = Vec::new();
+        let mut triangle_list = Vec::new();
+        for (i, line) in text.iter().enumerate() {
+            let (v, t) = self.add_text(&font, scale, &line, i, vertex_list.len(), scroll_y);
+            vertex_list.extend(v);
+            triangle_list.extend(t);
+        }
+
         // all the vertices we want to pass to the GPU
-        let vertex_buffer = VertexBuffer::new(&self.glium_display, &vertex_list[..]).unwrap();
+        let vertex_buffer = VertexBuffer::new(&self.glium_display, &vertex_list[..])?;
 
         // a list of triangles of vertex indices
-        let index_buffer = IndexBuffer::new(&self.glium_display, PrimitiveType::TrianglesList, &triangle_list[..]).unwrap();
+        let index_buffer = IndexBuffer::new(&self.glium_display, PrimitiveType::TrianglesList, &triangle_list[..])?;
 
         let mut target = self.glium_display.draw();
-        target.clear_color(0.0, 0.0, 0.0, 1.0);
+        target.clear_color(bg_color.0, bg_color.1, bg_color.2, bg_color.3);
 
         let draw_parameters  = glium::DrawParameters {
             blend: Blend::alpha_blending(),
@@ -390,15 +398,11 @@ impl Display {
         };
 
         // Bind the vertex buffer, index buffer, texture, and program
-        target.draw(
-            &vertex_buffer,
-            &index_buffer,
-            &self.program,
-            &uniform! { tex: &self.texture },
-            &draw_parameters,
-        ).unwrap();
+        let uniform = uniform! { tex: &self.texture };
+        target.draw(&vertex_buffer, &index_buffer, &self.program, &uniform, &draw_parameters)?;
 
         // Finish the frame
-        target.finish().unwrap();
+        target.finish()?;
+        Ok(())
     }
 }
