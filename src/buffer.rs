@@ -37,6 +37,16 @@ pub struct TextBuffer {
     pub contents: Rc<str>,
 }
 
+impl Selection {
+    pub fn reverse(&self) -> Self {
+        Self {start: self.end(), offset: -self.offset}
+    }
+
+    pub fn end(&self) -> usize {
+        return ((self.start as i64) - self.offset) as usize
+    }
+}
+
 impl TextBuffer {
     pub fn from_filename(filename: &str) -> Result<Self, std::io::Error> {
         let contents = Rc::from(read_to_string(filename)?);
@@ -46,6 +56,8 @@ impl TextBuffer {
         let cursors = Rc::from([Selection{start: 0, offset: 0}]);
         Ok(Self {file: Some(fi), cursors, main_cursor: 0, contents})
     }
+
+    // pub fn arrow(&self, )
 
     pub fn delete(&self) -> Self {
         let file = if let Some(fileinfo) = &self.file {
@@ -58,9 +70,10 @@ impl TextBuffer {
             None
         };
         let update = if self.cursors[self.main_cursor].offset == 0 {
-            |(_, s): (usize, &Selection)| Selection{start: s.start - 1, offset: 0 as i64}
+            // adding 1 in zero case fixes it
+            |(i, s): (usize, &Selection)| Selection{start: s.start + (s.start == 0) as usize - (i+1), offset: 0 as i64}
         } else {
-            |(_, s): (usize, &Selection)| Selection{start: s.start - s.offset as usize, offset: 0 as i64}
+            |(_, s): (usize, &Selection)| Selection{start: s.end(), offset: 0 as i64}
         };
         let cursors: Vec<Selection> = self.cursors.iter().enumerate().map(update).collect();
         let cursors = Rc::from(cursors);
@@ -68,7 +81,8 @@ impl TextBuffer {
         let mut contents = String::new();
         let mut prev = 0;
         for selection in self.cursors.iter() {
-            contents += &self.contents[prev..selection.start-1];
+            // adding 1 in zero case fixes it
+            contents += &self.contents[prev..selection.start + (selection.start==0) as usize -1];
             prev = selection.start;
         }
         contents += &self.contents[prev..];
@@ -76,6 +90,10 @@ impl TextBuffer {
 
         Self {file, cursors, main_cursor: self.main_cursor, contents}
     }
+
+    // pub fn up(&self) -> Self {
+    //     let cursors: Vec<Selection> = self.cursors.iter().
+    // }
 
     pub fn insert(&self, text: &str) -> Self {
         let file = if let Some(fileinfo) = &self.file {
@@ -140,6 +158,22 @@ mod tests {
         let v = vec!["abcdef", "jfkdsalfjads", "kadsjlfla", "alskdjflasd", "asdjkflsda", "aghigh"];
 
         for (a, b) in buffer.lines().zip(v) {
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn test_delete() {
+        let buffer = TextBuffer {
+            file: None,
+            cursors: Rc::from(vec![Selection {start: 1, offset: 0}, Selection {start: 5, offset: 0}, Selection {start: 8, offset: 0}]),
+            contents: Rc::from("abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh"),
+            main_cursor: 0,
+        };
+        let buffer = buffer.delete();
+
+        assert_eq!(buffer.contents.as_ref(), "bcdf\nfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh");
+        for (a, b) in buffer.cursors.iter().zip(&[Selection{start: 0, offset: 0}, Selection{start: 3, offset: 0}, Selection{start: 5, offset: 0}]) {
             assert_eq!(a, b);
         }
     }

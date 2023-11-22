@@ -147,13 +147,13 @@ impl GlyphAtlas {
             let glyph = if glyph.id() == notdef_id {
                 warn!("`{c}` with bytes: {} not found in font!", char2hex(c));
 
-                // // EMOJI: this is slow, but finds the emojis (but we can't seem to use them, so...)
-                // let font_data = include_bytes!("/System/Library/Fonts/Apple Color Emoji.ttc");
-                // let font = Font::try_from_bytes(font_data).expect("Error loading font");
-                // let glyph = font.glyph(c);
-                // if glyph.id() == notdef_id {
-                //     warn!("fuck it isn't an emoji");
-                // }
+                // EMOJI: this is slow, but finds the emojis (but we can't seem to use them, so...)
+                let font_data = include_bytes!("/System/Library/Fonts/Apple Color Emoji.ttc");
+                let font = Font::try_from_bytes(font_data).expect("Error loading font");
+                let glyph = font.glyph(c);
+                if glyph.id() == notdef_id {
+                    warn!("fuck it isn't an emoji");
+                }
                 glyph
             } else {
                 glyph
@@ -433,6 +433,9 @@ impl Display {
 
     pub fn draw(&self, font_size: f32, font: &Font, scroll_y: f32, buffer: &TextBuffer, bg_color: (f32, f32, f32, f32)) -> Result<(), Box<dyn std::error::Error>> {
         let scale = rusttype::Scale::uniform(font_size);
+        // pick lines that are relevant (this is a call to buffer.nowrap_graphemes(line_height, scroll_y, window_height), returns iterator of extended graphemes
+        // extended graphemes -> glyphs --> vertex + index buffers
+        //                              |-> mid-grapheme positions -> vertex + index buffers for cursors
 
         let mut vertex_list = Vec::new();
         let mut triangle_list = Vec::new();

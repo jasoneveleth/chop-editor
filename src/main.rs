@@ -2,8 +2,8 @@ use std::env;
 
 use rusttype::Font; 
 use glutin::dpi::{LogicalSize, PhysicalPosition};
-use glutin::event::WindowEvent::{CloseRequested, MouseWheel, ModifiersChanged, ReceivedCharacter};
-use glutin::event::{Event, MouseScrollDelta, ModifiersState};
+use glutin::event::WindowEvent::{CloseRequested, MouseWheel, ModifiersChanged, ReceivedCharacter,KeyboardInput};
+use glutin::event::{Event, MouseScrollDelta, ModifiersState, ElementState};
 use log::{info, warn, error, debug};
 
 // use pager::render::terminal_render;
@@ -130,6 +130,25 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                 }
                 ModifiersChanged(state) => {
                     modifier_state = state;
+                },
+                KeyboardInput{device_id: _, input, is_synthetic: _} => {
+                    let mut need_redraw = false;
+                    if input.state == ElementState::Released {
+                        // match input.scancode {
+                        //     126 => buffer = buffer.up(),
+                        //     123 => buffer = buffer.left(),
+                        //     125 => buffer = buffer.down(),
+                        //     124 => buffer = buffer.right(),
+                        // }
+                        need_redraw = true;
+                    }
+                    if need_redraw {
+                        match display.draw(font_size, &font, scroll_y, &buffer, background_color) {
+                            Err(err) => error!("problem drawing: {:?}", err),
+                            _ => ()
+                        }
+                    }
+                    dbg!(input);
                 },
                 _ => (),
             },
