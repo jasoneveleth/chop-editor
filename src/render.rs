@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use glium::program::ProgramCreationInput;
 use log::error;
 use log::warn;
 use rusttype::Scale; 
@@ -9,7 +10,8 @@ use rusttype::Font;
 use glium::Surface;
 use glium::implement_vertex;
 use glium::uniform;
-use glium::{Texture2d, Program, VertexBuffer, IndexBuffer};
+use glium::{Program, VertexBuffer, IndexBuffer};
+use glium::texture::Texture2d;
 use glium::index::PrimitiveType;
 use glium::Blend;
 use std::ops::Add;
@@ -128,7 +130,7 @@ fn is_variation_selector(c: &char) -> bool {
 }
 
 impl GlyphAtlas {
-    pub fn from_font(font: &Font, font_size: f32, font_color: (u8, u8, u8)) -> Self {
+    pub fn from_font(font: &Font, font_size: f32, font_color: (f32, f32, f32)) -> Self {
         let scale = Scale::uniform(font_size);
 
         // let all_chars = "ab❤️";
@@ -195,9 +197,9 @@ impl GlyphAtlas {
 
                     let v = (v * 255.0) as u8;
                     let (r, g, b) = font_color;
-                    buffer[index] = r;
-                    buffer[index + 1] = g;
-                    buffer[index + 2] = b;
+                    buffer[index] = (r * 255.0) as u8;
+                    buffer[index + 1] = (g * 255.0) as u8;
+                    buffer[index + 2] = (b * 255.0) as u8;
                     buffer[index + 3] = v;
                 });
 
@@ -277,7 +279,19 @@ impl Display {
 
         let raw_image = glium::texture::RawImage2d::from_raw_rgba(glyph_atlas.buffer, (glyph_atlas.width as u32, glyph_atlas.height as u32));
         let texture = Texture2d::new(&display, raw_image).expect("unable to create 2d texture");
-        let program = Program::from_source(&display, VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE, None).expect("unable to create program");
+        // let program = Program::from_source(&display, VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE, None).expect("unable to create program");
+        let program = Program::new(
+            &display, 
+            ProgramCreationInput::SourceCode {
+                vertex_shader: VERTEX_SHADER_SOURCE, 
+                fragment_shader: FRAGMENT_SHADER_SOURCE, 
+                geometry_shader: None,
+                tessellation_control_shader: None,
+                tessellation_evaluation_shader: None,
+                transform_feedback_varyings: None,
+                outputs_srgb: true, // <- This seems to fix the issue
+                uses_point_size: false,
+            }).expect("unable to create program");
 
         Self {glyph_info: glyph_atlas.map, glium_display: display, program, texture}
     }
@@ -324,7 +338,10 @@ impl Display {
                 continue;
             }
 
-            let bbox = glyph.pixel_bounding_box().expect(&format!("character `{c}` bytes: {}", char2hex(c)));
+            let bbox = glyph.pixel_bounding_box().unwrap_or_else(|| {
+                error!("couldn't get bounding box for character {:?}", c);
+                panic!("couldn't get bounding box for character");
+            });
 
             let x = (bbox.min.x as f32 / window_size.width as f32) * 2.0;
             let y = ((window_size.height as f32 - bbox.min.y as f32) / window_size.height as f32) * 2.0;
@@ -390,9 +407,9 @@ impl Display {
         let index_buffer = IndexBuffer::new(&self.glium_display, PrimitiveType::TrianglesList, &triangle_list[..])?;
 
         let mut target = self.glium_display.draw();
-        target.clear_color(bg_color.0, bg_color.1, bg_color.2, bg_color.3);
+        target.clear_color_srgb(bg_color.0, bg_color.1, bg_color.2, bg_color.3);
 
-        let draw_parameters  = glium::DrawParameters {
+        let draw_parameters = glium::DrawParameters {
             blend: Blend::alpha_blending(),
             .. Default::default()
         };
