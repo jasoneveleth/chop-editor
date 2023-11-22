@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::Lines;
 
 use glium::program::ProgramCreationInput;
 use log::error;
@@ -19,6 +20,8 @@ use std::ops::Add;
 use log::debug;
 
 use term_size;
+
+use crate::buffer::TextBuffer;
 
 fn calc_chunk_size(default_val: usize) -> usize {
     let log_prefix_size = 43;
@@ -389,12 +392,13 @@ impl Display {
         (vertices, indices)
     }
 
-    pub fn draw(&self, font_size: f32, font: &Font, scroll_y: f32, text: &Vec<String>, bg_color: (f32, f32, f32, f32)) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn draw(&self, font_size: f32, font: &Font, scroll_y: f32, lines: Lines, bg_color: (f32, f32, f32, f32)) -> Result<(), Box<dyn std::error::Error>> {
         let scale = rusttype::Scale::uniform(font_size);
 
         let mut vertex_list = Vec::new();
         let mut triangle_list = Vec::new();
-        for (i, line) in text.iter().enumerate() {
+        for (i, line) in lines.enumerate() {
+            // we want these to be the lines we're displaying
             let (v, t) = self.add_text(&font, scale, &line, i, vertex_list.len(), scroll_y);
             vertex_list.extend(v);
             triangle_list.extend(t);

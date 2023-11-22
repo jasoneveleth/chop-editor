@@ -1,15 +1,15 @@
-use std::fs::read_to_string;
 use std::env;
 
 use rusttype::Font; 
 use glutin::dpi::{LogicalSize, PhysicalPosition};
 use glutin::event::WindowEvent::{CloseRequested, MouseWheel, ModifiersChanged, ReceivedCharacter};
 use glutin::event::{Event, MouseScrollDelta, ModifiersState};
-use log::{info, warn, error};
+use log::{info, warn, error, debug};
 
 // use pager::render::terminal_render;
 use pager::render::GlyphAtlas;
 use pager::render::Display;
+use pager::buffer::TextBuffer;
 
 fn main() {
     env_logger::init();
@@ -29,17 +29,16 @@ fn main() {
     let font_color = font_color;
     let atlas = GlyphAtlas::from_font(&font, font_size, font_color);
 
-    if let Ok(text) = read_to_string(file_path) {
-        let text = text.lines().map(String::from).collect();
+    if let Ok(buffer) = TextBuffer::from_filename(file_path) {
         // terminal_render(atlas.width, atlas.height, &atlas.buffer);
-        run(atlas, font, font_size, text);
+        run(atlas, font, font_size, buffer);
     } else {
         error!("file doesn't exist");
         std::process::exit(1);
     }
 }
 
-fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut text: Vec<String>) {
+fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer: TextBuffer) {
     let size = LogicalSize {width: 800, height: 600};
     let title = "My Boi";
 
@@ -83,7 +82,7 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut text: V
                         MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
                             scroll_y += y as f32;
                             scroll_y = scroll_y.min(0f32);
-                            match display.draw(font_size, &font, scroll_y, &text, background_color) {
+                            match display.draw(font_size, &font, scroll_y, buffer.lines(), background_color) {
                                 Err(err) => error!("problem drawing: {:?}", err),
                                 _ => ()
                             }
@@ -100,25 +99,25 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut text: V
                                 *control_flow = glutin::event_loop::ControlFlow::Exit;
                                 return;
                             } else {
-                                let last = text.len() - 1;
-                                text[last] += "w";
+                                buffer = buffer.insert("w");
                                 need_redraw = true;
                             }
                         },
                         '\r' => {
-                            text.push("".to_string());
+                            buffer = buffer.insert("\n");
                             need_redraw = true;
                         }
                         _ => {
                             if ch.is_ascii() {
-                                let last = text.len() - 1;
-                                text[last] += &format!("{ch}");
+                                let text = &format!("{ch}");
+                                debug!("{}", text);
+                                buffer = buffer.insert(text);
                                 need_redraw = true;
                             }
                         }
                     }
                     if need_redraw {
-                        match display.draw(font_size, &font, scroll_y, &text, background_color) {
+                        match display.draw(font_size, &font, scroll_y, buffer.lines(), background_color) {
                             Err(err) => error!("problem drawing: {:?}", err),
                             _ => ()
                         }
@@ -131,7 +130,7 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut text: V
             },
             Event::RedrawRequested(_window_id) => {
                 info!("redraw requested");
-                match display.draw(font_size, &font, scroll_y, &text, background_color) {
+                match display.draw(font_size, &font, scroll_y, buffer.lines(), background_color) {
                     Err(err) => error!("problem drawing: {:?}", err),
                     _ => ()
                 }
