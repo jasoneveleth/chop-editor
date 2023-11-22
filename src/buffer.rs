@@ -14,7 +14,7 @@ pub struct Selection {
     // `start` is the location of the cursor is in the selection
     // 0 means before the first character, and n means after the nth character
     // emojis count as 1
-    start: usize,
+    pub start: usize,
     // offset to the end of the selection such that `start + offset` is end of selection
     offset: i64,
 }
@@ -30,7 +30,10 @@ pub struct FileInfo {
 
 pub struct TextBuffer {
     pub file: Option<FileInfo>,
+    // !!! this should always be sorted
     pub cursors: Rc<[Selection]>,
+    // this is the index
+    pub main_cursor: usize,
     pub contents: Rc<str>,
 }
 
@@ -41,7 +44,37 @@ impl TextBuffer {
         let filename = Rc::from(PathBuf::from(filename));
         let fi = FileInfo {filename, is_modified: false, file_time: now};
         let cursors = Rc::from([Selection{start: 0, offset: 0}]);
-        Ok(Self {file: Some(fi), cursors, contents})
+        Ok(Self {file: Some(fi), cursors, main_cursor: 0, contents})
+    }
+
+    pub fn delete(&self) -> Self {
+        let file = if let Some(fileinfo) = &self.file {
+            Some(FileInfo {
+                filename: fileinfo.filename.clone(),
+                is_modified: true,
+                file_time: fileinfo.file_time,
+            })
+        } else {
+            None
+        };
+        let update = if self.cursors[self.main_cursor].offset == 0 {
+            |(_, s): (usize, &Selection)| Selection{start: s.start - 1, offset: 0 as i64}
+        } else {
+            |(_, s): (usize, &Selection)| Selection{start: s.start - s.offset as usize, offset: 0 as i64}
+        };
+        let cursors: Vec<Selection> = self.cursors.iter().enumerate().map(update).collect();
+        let cursors = Rc::from(cursors);
+
+        let mut contents = String::new();
+        let mut prev = 0;
+        for selection in self.cursors.iter() {
+            contents += &self.contents[prev..selection.start-1];
+            prev = selection.start;
+        }
+        contents += &self.contents[prev..];
+        let contents = Rc::from(contents);
+
+        Self {file, cursors, main_cursor: self.main_cursor, contents}
     }
 
     pub fn insert(&self, text: &str) -> Self {
@@ -54,10 +87,7 @@ impl TextBuffer {
         } else {
             None
         };
-        let mut cursors = self.cursors.to_vec();
-        assert!(cursors.len() < 100); // rethink this into a better data structure
-        cursors.sort_by(|a, b| a.start.cmp(&b.start));
-        let cursors: Vec<Selection> = cursors.iter().enumerate().map(|(i, s)| Selection{start: s.start + (i+1) * text.len(), offset: text.len() as i64}).collect();
+        let cursors: Vec<Selection> = self.cursors.iter().enumerate().map(|(i, s)| Selection{start: s.start + (i+1) * text.len(), offset: text.len() as i64}).collect();
         let cursors = Rc::from(cursors);
 
         let mut contents = String::new();
@@ -70,7 +100,7 @@ impl TextBuffer {
         contents += &self.contents[prev..];
         let contents = Rc::from(contents);
 
-        Self {file, cursors, contents}
+        Self {file, cursors, main_cursor: self.main_cursor, contents}
     }
 
     pub fn lines(&self) -> std::str::Lines {
@@ -88,6 +118,7 @@ mod tests {
             file: None,
             cursors: Rc::from(vec![Selection {start: 1, offset: 1}, Selection {start: 5, offset: 1}, Selection {start: 8, offset: 1}]),
             contents: Rc::from("abcdefghigh"),
+            main_cursor: 0,
         };
         let buffer = buffer.insert("xz");
 
@@ -104,6 +135,7 @@ mod tests {
             file: None,
             cursors: Rc::from(vec![Selection {start: 1, offset: 1}, Selection {start: 5, offset: 1}, Selection {start: 8, offset: 1}]),
             contents: Rc::from("abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh"),
+            main_cursor: 0,
         };
         let v = vec!["abcdef", "jfkdsalfjads", "kadsjlfla", "alskdjflasd", "asdjkflsda", "aghigh"];
 

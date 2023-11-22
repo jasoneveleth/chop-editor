@@ -23,7 +23,6 @@ fn main() {
     let font_data = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
     let font = Font::try_from_bytes(font_data).expect("Error loading font");
     let font_size = 50.0;
-    // let font_color = (0x38, 0x3A, 0x42);
     let font_color = (0xab, 0xb2, 0xbf);
     let font_color = (font_color.0 as f32 / 255.0, font_color.1 as f32 / 255.0, font_color.2 as f32 / 255.0);
     let font_color = font_color;
@@ -48,7 +47,8 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
     let window = cb.with_srgb(true).build_windowed(wb, &event_loop).expect("unable to create window");
 
     let display = Display::new(glyph_atlas, window);
-    let mut scroll_y = 0.0;
+    // TODO: factor out
+    let mut scroll_y = -6.0;
 
     let mut modifier_state = ModifiersState::default();
 
@@ -76,13 +76,14 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                     match delta {
                         MouseScrollDelta::LineDelta(_, y) => {
                             // Adjust the scroll position based on the scroll delta
-                            scroll_y += y * 20.0; // Adjust the scroll speed as needed
+                            scroll_y -= y * 20.0; // Adjust the scroll speed as needed
                             warn!("we don't expect a linedelta from mouse scroll on macOS, ignoring");
                         },
                         MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
-                            scroll_y += y as f32;
-                            scroll_y = scroll_y.min(0f32);
-                            match display.draw(font_size, &font, scroll_y, buffer.lines(), background_color) {
+                            scroll_y -= y as f32;
+                            // TODO: factor out
+                            scroll_y = scroll_y.max(-6.);
+                            match display.draw(font_size, &font, scroll_y, &buffer, background_color) {
                                 Err(err) => error!("problem drawing: {:?}", err),
                                 _ => ()
                             }
@@ -106,7 +107,11 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                         '\r' => {
                             buffer = buffer.insert("\n");
                             need_redraw = true;
-                        }
+                        },
+                        '\x7f' => {
+                            buffer = buffer.delete();
+                            need_redraw = true;
+                        },
                         _ => {
                             if ch.is_ascii() {
                                 let text = &format!("{ch}");
@@ -117,7 +122,7 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                         }
                     }
                     if need_redraw {
-                        match display.draw(font_size, &font, scroll_y, buffer.lines(), background_color) {
+                        match display.draw(font_size, &font, scroll_y, &buffer, background_color) {
                             Err(err) => error!("problem drawing: {:?}", err),
                             _ => ()
                         }
@@ -130,7 +135,7 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
             },
             Event::RedrawRequested(_window_id) => {
                 info!("redraw requested");
-                match display.draw(font_size, &font, scroll_y, buffer.lines(), background_color) {
+                match display.draw(font_size, &font, scroll_y, &buffer, background_color) {
                     Err(err) => error!("problem drawing: {:?}", err),
                     _ => ()
                 }

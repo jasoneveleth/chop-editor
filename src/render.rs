@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::str::Lines;
 
 use glium::program::ProgramCreationInput;
 use log::error;
@@ -148,7 +147,7 @@ impl GlyphAtlas {
             let glyph = if glyph.id() == notdef_id {
                 warn!("`{c}` with bytes: {} not found in font!", char2hex(c));
 
-                // // this is slow, but finds the emojis (but we can't seem to use them, so...)
+                // // EMOJI: this is slow, but finds the emojis (but we can't seem to use them, so...)
                 // let font_data = include_bytes!("/System/Library/Fonts/Apple Color Emoji.ttc");
                 // let font = Font::try_from_bytes(font_data).expect("Error loading font");
                 // let glyph = font.glyph(c);
@@ -223,7 +222,7 @@ impl GlyphAtlas {
     }
 }
 
-const VERTEX_SHADER_SOURCE: &str = r#"
+const FONT_VERTEX_SHADER_SOURCE: &str = r#"
     #version 330 core
 
     in vec2 position;
@@ -236,7 +235,7 @@ const VERTEX_SHADER_SOURCE: &str = r#"
     }
 "#;
 
-const FRAGMENT_SHADER_SOURCE: &str = r#"
+const FONT_FRAGMENT_SHADER_SOURCE: &str = r#"
     #version 330 core
 
     uniform sampler2D tex;
@@ -248,6 +247,26 @@ const FRAGMENT_SHADER_SOURCE: &str = r#"
     }
 "#;
 
+const CURSOR_VERTEX_SHADER_SOURCE: &str = r#"
+    #version 140
+
+    in vec2 position;
+
+    void main() {
+        gl_Position = vec4(position, 0.0, 1.0);
+    }
+"#;
+
+const CURSOR_FRAGMENT_SHADER_SOURCE: &str = r#"
+    #version 140
+
+    out vec4 color;
+
+    void main() {
+        color = vec4(1.0, 0.2, 0.2, 1.0); // Red color
+    }
+"#;
+
 #[derive(Copy, Clone)]
 pub struct Vertex {
     position: [f32; 2],
@@ -256,10 +275,18 @@ pub struct Vertex {
 
 implement_vertex!(Vertex, position, tex_coords);
 
+#[derive(Copy, Clone, Debug)]
+pub struct CursorVertex {
+    position: [f32; 2],
+}
+
+implement_vertex!(CursorVertex, position);
+
 pub struct Display {
     glium_display: glium::Display,
-    program: Program,
-    texture: Texture2d,
+    cursor_program: Program,
+    font_program: Program,
+    atlas_texture: Texture2d,
     glyph_info: GlyphInfo,
 }
 
@@ -282,12 +309,11 @@ impl Display {
 
         let raw_image = glium::texture::RawImage2d::from_raw_rgba(glyph_atlas.buffer, (glyph_atlas.width as u32, glyph_atlas.height as u32));
         let texture = Texture2d::new(&display, raw_image).expect("unable to create 2d texture");
-        // let program = Program::from_source(&display, VERTEX_SHADER_SOURCE, FRAGMENT_SHADER_SOURCE, None).expect("unable to create program");
-        let program = Program::new(
+        let font_program = Program::new(
             &display, 
             ProgramCreationInput::SourceCode {
-                vertex_shader: VERTEX_SHADER_SOURCE, 
-                fragment_shader: FRAGMENT_SHADER_SOURCE, 
+                vertex_shader: FONT_VERTEX_SHADER_SOURCE, 
+                fragment_shader: FONT_FRAGMENT_SHADER_SOURCE, 
                 geometry_shader: None,
                 tessellation_control_shader: None,
                 tessellation_evaluation_shader: None,
@@ -296,24 +322,39 @@ impl Display {
                 uses_point_size: false,
             }).expect("unable to create program");
 
-        Self {glyph_info: glyph_atlas.map, glium_display: display, program, texture}
+        let cursor_program = Program::new(
+            &display, 
+            ProgramCreationInput::SourceCode {
+                vertex_shader: CURSOR_VERTEX_SHADER_SOURCE, 
+                fragment_shader: CURSOR_FRAGMENT_SHADER_SOURCE, 
+                geometry_shader: None,
+                tessellation_control_shader: None,
+                tessellation_evaluation_shader: None,
+                transform_feedback_varyings: None,
+                outputs_srgb: true, // <- This seems to fix the issue
+                uses_point_size: false,
+            }).expect("unable to create program");
+
+        Self {glyph_info: glyph_atlas.map, glium_display: display, cursor_program, font_program, atlas_texture: texture}
     }
 
-    pub fn add_text(&self, font: &Font, scale: Scale, text: &str, line_num: usize, vertex_index_start: usize, scroll_y: f32) -> (Vec<Vertex>, Vec<u32>) {
+    pub fn add_text(&self, font: &Font, scale: Scale, text: &str, line_num: usize, vertex_index_start: usize, scroll_y: f32) -> (Vec<Vertex>, Vec<u32>, Vec<[f32; 2]>) {
         let window_size = self.glium_display.gl_window().window().inner_size();
 
         let v_metrics = font.v_metrics(scale);
         let line_height = v_metrics.ascent - v_metrics.descent;
 
         // 0,0 is top left, positive y goes down
-        let start_x = 0.0;
-        let start_y = line_num as f32 * (line_height + v_metrics.line_gap) + scroll_y;
+        let start_y = line_num as f32 * (line_height + v_metrics.line_gap) - scroll_y;
+        // TODO: factor this out
+        let start = point(6.0, start_y + v_metrics.ascent);
 
         // check if line is off screen
-        let bottom_of_line = start_y - v_metrics.descent + line_height;
-        let top_of_line = start_y - v_metrics.ascent;
+        let top_of_line = start_y;
+        let bottom_of_line = start_y + line_height;
         if  bottom_of_line < 0. || top_of_line > window_size.height as f32 {
-            return (Vec::new(), Vec::new())
+            // EMOJI: this is wrong: text.len() isn't necessarily the # of glyphs
+            return (Vec::new(), Vec::new(), vec![[-1f32, -1f32]; text.len()])
         }
 
         // source: https://git.xobs.io/xobs/rust-font-test/src/branch/master/src/main.rs line 281
@@ -322,15 +363,20 @@ impl Display {
         // it down with an offset when laying it out. v_metrics.ascent is the
         // distance between the baseline and the highest edge of any glyph in
         // the font. That's enough to guarantee that there's no clipping.
-        let glyphs: Vec<_> = font.layout(text, scale, point(start_x, start_y + v_metrics.ascent)).collect();
-
-        // // work out the layout size of fully rendered text
-        // let glyphs_height = (v_metrics.ascent - v_metrics.descent).ceil() as u32;
-        // let glyphs_width = {
-        //     let min_x = glyphs.first().map(|g| g.pixel_bounding_box().unwrap().min.x).unwrap();
-        //     let max_x = glyphs.last().map(|g| g.pixel_bounding_box().unwrap().max.x).unwrap();
-        //     (max_x - min_x) as u32
-        // };
+        let mut top_lefts_widths = vec![[top_of_line, start.x]];
+        let glyphs: Vec<_> = font.glyphs_for(text.chars())
+            .scan((None, 0.0), |(last, x), g| {
+                let g = g.scaled(scale);
+                if let Some(last) = last {
+                    *x += font.pair_kerning(scale, *last, g.id());
+                }
+                let w = g.h_metrics().advance_width;
+                let next = g.positioned(start + rusttype::vector(*x, 0.0));
+                *last = Some(next.id());
+                *x += w;
+                top_lefts_widths.push([top_of_line, start.x + *x]);
+                Some(next)
+            }).collect();
 
         let mut vertices = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
@@ -346,33 +392,26 @@ impl Display {
                 panic!("couldn't get bounding box for character");
             });
 
-            let x = (bbox.min.x as f32 / window_size.width as f32) * 2.0;
-            let y = ((window_size.height as f32 - bbox.min.y as f32) / window_size.height as f32) * 2.0;
-            let top_left = rusttype::point(x-1., y-1.);
+            let x = (bbox.min.x as f32 / window_size.width as f32) * 2.0 - 1.;
+            let y = ((bbox.min.y as f32) / window_size.height as f32) * -2.0 + 1.;
+            let top_left = rusttype::point(x, y);
 
             let glyph_data = self.glyph_info.get(&c).unwrap();
 
             let new_width = (glyph_data.width as f32 / window_size.width as f32) * 2.0;
             let new_height = (glyph_data.height as f32 / window_size.height as f32) * 2.0;
 
-            if top_left.x + new_width <= -1. {
-                // warn!("glyph is rendered off (left) of screen")
+            if top_left.x + new_width <= -1. || top_left.x >= 1. {
+                // warn!("glyph is rendered off (left || right) of screen")
                 continue;
             }
-            if top_left.y <= -1. {
-                // warn!("glyph is rendered off (bottom) of screen")
-                continue;
-            }
-            if top_left.x >= 1. {
-                // warn!("glyph is rendered off (right) of screen")
-                continue;
-            }
-            if top_left.y - new_height >= 1. {
-                // warn!("glyph is rendered off (top) of screen")
+            if top_left.y <= -1. || top_left.y - new_height >= 1.{
+                // warn!("glyph is rendered off (bottom || top) of screen")
                 continue;
             }
 
-            let index = vertices.len() + vertex_index_start;
+            // we "resume" bc we are calling this in a loop
+            let index = vertex_index_start + vertices.len();
 
             vertices.push(Vertex { position: [top_left.x, top_left.y - new_height], tex_coords: glyph_data.tex_pos[0] });
             vertices.push(Vertex { position: [top_left.x, top_left.y], tex_coords: glyph_data.tex_pos[1] });
@@ -389,17 +428,20 @@ impl Display {
             indices.push((index + 2) as u32);
             indices.push((index + 3) as u32);
         }
-        (vertices, indices)
+        (vertices, indices, top_lefts_widths)
     }
 
-    pub fn draw(&self, font_size: f32, font: &Font, scroll_y: f32, lines: Lines, bg_color: (f32, f32, f32, f32)) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn draw(&self, font_size: f32, font: &Font, scroll_y: f32, buffer: &TextBuffer, bg_color: (f32, f32, f32, f32)) -> Result<(), Box<dyn std::error::Error>> {
         let scale = rusttype::Scale::uniform(font_size);
 
         let mut vertex_list = Vec::new();
         let mut triangle_list = Vec::new();
-        for (i, line) in lines.enumerate() {
+        let mut top_lefts_widths = Vec::new();
+        for (i, line) in buffer.lines().enumerate() {
             // we want these to be the lines we're displaying
-            let (v, t) = self.add_text(&font, scale, &line, i, vertex_list.len(), scroll_y);
+            let (v, t, tlw) = self.add_text(&font, scale, &line, i, vertex_list.len(), scroll_y);
+            top_lefts_widths.extend(tlw);
+
             vertex_list.extend(v);
             triangle_list.extend(t);
         }
@@ -419,9 +461,56 @@ impl Display {
         };
 
         // Bind the vertex buffer, index buffer, texture, and program
-        let uniform = uniform! { tex: &self.texture };
-        target.draw(&vertex_buffer, &index_buffer, &self.program, &uniform, &draw_parameters)?;
+        let uniform = uniform! { tex: &self.atlas_texture };
+        target.draw(&vertex_buffer, &index_buffer, &self.font_program, &uniform, &draw_parameters)?;
 
+        // ======================================================================
+        // now for the cursors
+
+        // get line height
+        let window_size = self.glium_display.gl_window().window().inner_size();
+        let v_metrics = font.v_metrics(scale);
+        let line_height = v_metrics.ascent - v_metrics.descent;
+        let shader_line_height = 2.*(line_height+v_metrics.line_gap)/window_size.height as f32;
+
+        let mut vertex_list = Vec::new();
+        let mut triangle_list = Vec::new();
+        for cursor in buffer.cursors.iter() {
+            if cursor.start > top_lefts_widths.len() {
+
+            } else {
+                let info = top_lefts_widths[cursor.start];
+                let [top, left] = info;
+                let [top, left] = [-2.*top/window_size.height as f32+1., 2.*left/window_size.width as f32-1.];
+
+                if left == -1. {
+                    // then this glyph wasn't drawn for some reason since sentinels are still there
+                    continue;
+                } else {
+                    let index = vertex_list.len();
+                    let cursor_width = 2.*(2.2)/window_size.width as f32; // TODO: hardcoded cursor width based on glyph
+                    vertex_list.push(CursorVertex { position: [left - cursor_width, top - shader_line_height]});
+                    vertex_list.push(CursorVertex { position: [left + cursor_width, top - shader_line_height]});
+                    vertex_list.push(CursorVertex { position: [left + cursor_width, top]});
+                    vertex_list.push(CursorVertex { position: [left - cursor_width, top]});
+
+                    // a list of triangles of vertex indices
+                    // triangle 1
+                    triangle_list.push(index as u32);
+                    triangle_list.push((index+1) as u32);
+                    triangle_list.push((index+2) as u32);
+                    // triangle 2
+                    triangle_list.push(index as u32);
+                    triangle_list.push((index+2) as u32);
+                    triangle_list.push((index+3) as u32);
+                }
+            }
+        }
+        let vertex_buffer = VertexBuffer::new(&self.glium_display, &vertex_list).unwrap();
+        let index_buffer = IndexBuffer::new(&self.glium_display, PrimitiveType::TrianglesList, &triangle_list).unwrap();
+        target.draw(&vertex_buffer, &index_buffer, &self.cursor_program, &glium::uniforms::EmptyUniforms, &Default::default())?;
+
+        // ======================================================================
         // Finish the frame
         target.finish()?;
         Ok(())
