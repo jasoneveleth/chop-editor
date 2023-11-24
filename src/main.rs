@@ -140,9 +140,9 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                     if input.state == ElementState::Released {
                         match input.scancode {
                             // 126 => buffer = buffer.up(),
-                            123 => buffer = buffer.left(),
+                            123 => buffer = buffer.move_horizontal(-1),
                             // 125 => buffer = buffer.down(),
-                            // 124 => buffer = buffer.right(),
+                            124 => buffer = buffer.move_horizontal(1),
                             _ => (),
                         }
                         need_redraw = true;

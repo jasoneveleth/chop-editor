@@ -373,6 +373,7 @@ impl Display {
             let glyph: Glyph = font.glyphs_for(g.chars()).to_owned().nth(0).unwrap();
             let g = glyph.scaled(scale);
             let mut left_side_of_char = *x;
+            let top_of_char = line_start.y;
             if ch == '\n' {
                 line_start = line_start + rusttype::vector(0.0, total_line_height);
                 *x = 0.;
@@ -389,7 +390,7 @@ impl Display {
             if ch != '\n' {
                 *x += w;
             }
-            Some(((next, glyph_data), (line_start.x + left_side_of_char, line_start.y - ascent)))
+            Some(((next, glyph_data), (line_start.x + left_side_of_char, top_of_char - ascent)))
         }))
     }
 

@@ -64,6 +64,11 @@ impl TextBuffer {
         self.contents.lines().count()
     }
 
+    pub fn num_graphemes(&self) -> usize {
+        let s: &str = &self.contents;
+        UnicodeSegmentation::graphemes(s, true).count()
+    }
+
     // end is not included
     pub fn nowrap_lines(&self, start: usize, end: usize) -> (Graphemes, (usize, usize)) {
         let s: &str = &self.contents;
@@ -107,8 +112,7 @@ impl TextBuffer {
         (UnicodeSegmentation::graphemes(string, true), (grapheme_index as usize, grapheme_index as usize + diff))
     }
 
-
-    pub fn left(&self) -> Self {
+    pub fn move_horizontal(&self, offset: i64) -> Self {
         let file = if let Some(fileinfo) = &self.file {
             Some(FileInfo {
                 filename: fileinfo.filename.clone(),
@@ -118,7 +122,7 @@ impl TextBuffer {
         } else {
             None
         };
-        let cursors: Vec<_> = self.cursors.iter().map(|s| Selection{start: s.start + (s.start == 0) as usize - 1, offset: 0 as i64}).collect();
+        let cursors: Vec<_> = self.cursors.iter().map(|s| Selection{start: ((s.start as i64 + offset).max(0) as usize).min(self.num_graphemes()-1), offset: 0 as i64}).collect();
         let cursors = Rc::from(cursors);
         let contents = self.contents.clone();
 
