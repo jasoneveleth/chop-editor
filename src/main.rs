@@ -23,7 +23,8 @@ fn main() {
     let font_data = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
     let font = Font::try_from_bytes(font_data).expect("Error loading font");
     let font_size = 50.0;
-    let font_color = (0xab, 0xb2, 0xbf);
+    // let font_color = (0xab, 0xb2, 0xbf);
+    let font_color = (0x00, 0x00, 0x00);
     let font_color = (font_color.0 as f32 / 255.0, font_color.1 as f32 / 255.0, font_color.2 as f32 / 255.0);
     let font_color = font_color;
     let atlas = GlyphAtlas::from_font(&font, font_size, font_color);
@@ -47,13 +48,14 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
     let window = cb.with_srgb(true).build_windowed(wb, &event_loop).expect("unable to create window");
 
     let display = Display::new(glyph_atlas, window);
-    // TODO: factor out
-    let mut scroll_y = -6.0;
+    let y_padding = 6.0;
+    let x_padding = 6.0;
+    let mut scroll_y = -y_padding; // we want to scroll beyond the top (ie. negative)
 
     let mut modifier_state = ModifiersState::default();
 
-    // let color = (0xFA, 0xFA, 0xFA);
-    let color = (0x28, 0x2c, 0x34);
+    let color = (0xFA, 0xFA, 0xFA);
+    // let color = (0x28, 0x2c, 0x34);
     // let color = ((color.0 as f32 / 255.0).powf(2.2), (color.1 as f32 / 255.0).powf(2.2), (color.2 as f32 / 255.0).powf(2.2));
     let color = ((color.0 as f32 / 255.0), (color.1 as f32 / 255.0), (color.2 as f32 / 255.0));
     let (r, g, b) = color;
@@ -81,9 +83,11 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                         },
                         MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
                             scroll_y -= y as f32;
-                            // TODO: factor out
-                            scroll_y = scroll_y.max(-6.);
-                            match display.draw(font_size, &font, scroll_y, &buffer, background_color) {
+                            // we want to scroll past the top (ie. negative)
+                            let scale = rusttype::Scale::uniform(font_size);
+                            let line_height = font.v_metrics(scale).ascent - font.v_metrics(scale).descent + font.v_metrics(scale).line_gap;
+                            scroll_y = scroll_y.max(-y_padding).min((buffer.num_lines()-1) as f32 *line_height);
+                            match display.draw(font_size, &font, scroll_y, x_padding, &buffer, background_color) {
                                 Err(err) => error!("problem drawing: {:?}", err),
                                 _ => ()
                             }
@@ -122,7 +126,7 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                         }
                     }
                     if need_redraw {
-                        match display.draw(font_size, &font, scroll_y, &buffer, background_color) {
+                        match display.draw(font_size, &font, scroll_y, x_padding, &buffer, background_color) {
                             Err(err) => error!("problem drawing: {:?}", err),
                             _ => ()
                         }
@@ -134,27 +138,27 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                 KeyboardInput{device_id: _, input, is_synthetic: _} => {
                     let mut need_redraw = false;
                     if input.state == ElementState::Released {
-                        // match input.scancode {
-                        //     126 => buffer = buffer.up(),
-                        //     123 => buffer = buffer.left(),
-                        //     125 => buffer = buffer.down(),
-                        //     124 => buffer = buffer.right(),
-                        // }
+                        match input.scancode {
+                            // 126 => buffer = buffer.up(),
+                            123 => buffer = buffer.left(),
+                            // 125 => buffer = buffer.down(),
+                            // 124 => buffer = buffer.right(),
+                            _ => (),
+                        }
                         need_redraw = true;
                     }
                     if need_redraw {
-                        match display.draw(font_size, &font, scroll_y, &buffer, background_color) {
+                        match display.draw(font_size, &font, scroll_y, x_padding, &buffer, background_color) {
                             Err(err) => error!("problem drawing: {:?}", err),
                             _ => ()
                         }
                     }
-                    dbg!(input);
                 },
                 _ => (),
             },
             Event::RedrawRequested(_window_id) => {
                 info!("redraw requested");
-                match display.draw(font_size, &font, scroll_y, &buffer, background_color) {
+                match display.draw(font_size, &font, scroll_y, x_padding, &buffer, background_color) {
                     Err(err) => error!("problem drawing: {:?}", err),
                     _ => ()
                 }

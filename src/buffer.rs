@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::iter::Iterator;
 use std::time::SystemTime;
 use std::fs::read_to_string;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::Graphemes;
 
 // let | be the cursor, and \ be the end of the selection
 
@@ -34,7 +37,7 @@ pub struct TextBuffer {
     pub cursors: Rc<[Selection]>,
     // this is the index
     pub main_cursor: usize,
-    pub contents: Rc<str>,
+    contents: Rc<str>,
 }
 
 impl Selection {
@@ -57,7 +60,70 @@ impl TextBuffer {
         Ok(Self {file: Some(fi), cursors, main_cursor: 0, contents})
     }
 
-    // pub fn arrow(&self, )
+    pub fn num_lines(&self) -> usize {
+        self.contents.lines().count()
+    }
+
+    // end is not included
+    pub fn nowrap_lines(&self, start: usize, end: usize) -> (Graphemes, (usize, usize)) {
+        let s: &str = &self.contents;
+        let graphemes = UnicodeSegmentation::graphemes(s, true);
+        let mut grapheme_index = -1;
+        let mut num_lines = 0;
+        let mut byte_len = 0;
+        for g in graphemes {
+            if num_lines == start {
+                break;
+            } else {
+                grapheme_index += 1; // get i onto the index of g in graphemes
+                byte_len += g.len();
+                if g == "\n" {
+                    num_lines += 1;
+                }
+            }
+        }
+        grapheme_index += 1; // go onto the character after the newline
+
+        // now `grapheme_index` is at the first grapheme of the start line
+        // byte_len is the number of bytes up to that character
+        // num_lines = start
+
+        let mut byte_len2 = 0;
+        for byte in &self.contents.as_bytes()[byte_len..] {
+            if num_lines == end {
+                break;
+            }
+            if *byte == b'\n' {
+                num_lines += 1;
+            }
+            byte_len2 += 1;
+        }
+        let byte_array = &self.contents.as_bytes()[byte_len..byte_len+byte_len2];
+
+        // proof of safety: we are guarenteed that from newline to newline is valid utf8, if we
+        // started with valid utf8
+        let string = unsafe { std::str::from_utf8_unchecked(byte_array) };
+        let diff = UnicodeSegmentation::graphemes(string, true).count();
+        (UnicodeSegmentation::graphemes(string, true), (grapheme_index as usize, grapheme_index as usize + diff))
+    }
+
+
+    pub fn left(&self) -> Self {
+        let file = if let Some(fileinfo) = &self.file {
+            Some(FileInfo {
+                filename: fileinfo.filename.clone(),
+                is_modified: true,
+                file_time: fileinfo.file_time,
+            })
+        } else {
+            None
+        };
+        let cursors: Vec<_> = self.cursors.iter().map(|s| Selection{start: s.start + (s.start == 0) as usize - 1, offset: 0 as i64}).collect();
+        let cursors = Rc::from(cursors);
+        let contents = self.contents.clone();
+
+        Self {file, cursors, main_cursor: self.main_cursor, contents}
+    }
 
     pub fn delete(&self) -> Self {
         let file = if let Some(fileinfo) = &self.file {
@@ -129,15 +195,18 @@ impl TextBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn create_buffer(s: &str, cursors: Vec<Selection>) -> TextBuffer {
+        TextBuffer {
+            file: None, 
+            cursors: Rc::from(cursors), 
+            contents: Rc::from(s), 
+            main_cursor: 0
+        }
+    }
 
     #[test]
     fn test_text_buffer_insertion() {
-        let buffer = TextBuffer {
-            file: None,
-            cursors: Rc::from(vec![Selection {start: 1, offset: 1}, Selection {start: 5, offset: 1}, Selection {start: 8, offset: 1}]),
-            contents: Rc::from("abcdefghigh"),
-            main_cursor: 0,
-        };
+        let buffer = create_buffer("abcdefghigh", vec![Selection {start: 1, offset: 1}, Selection {start: 5, offset: 1}, Selection {start: 8, offset: 1}]);
         let buffer = buffer.insert("xz");
 
         // Assert that the buffer is created as expected
@@ -149,12 +218,7 @@ mod tests {
 
     #[test]
     fn test_lines() {
-        let buffer = TextBuffer {
-            file: None,
-            cursors: Rc::from(vec![Selection {start: 1, offset: 1}, Selection {start: 5, offset: 1}, Selection {start: 8, offset: 1}]),
-            contents: Rc::from("abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh"),
-            main_cursor: 0,
-        };
+        let buffer = create_buffer("abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh", vec![Selection {start: 1, offset: 1}, Selection {start: 5, offset: 1}, Selection {start: 8, offset: 1}]);
         let v = vec!["abcdef", "jfkdsalfjads", "kadsjlfla", "alskdjflasd", "asdjkflsda", "aghigh"];
 
         for (a, b) in buffer.lines().zip(v) {
@@ -162,19 +226,75 @@ mod tests {
         }
     }
 
+    // TODO: a test for backward facing selections and deletion
     #[test]
     fn test_delete() {
-        let buffer = TextBuffer {
-            file: None,
-            cursors: Rc::from(vec![Selection {start: 1, offset: 0}, Selection {start: 5, offset: 0}, Selection {start: 8, offset: 0}]),
-            contents: Rc::from("abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh"),
-            main_cursor: 0,
-        };
+        let cursors = vec![Selection {start: 1, offset: 0}, Selection {start: 5, offset: 0}, Selection {start: 8, offset: 0}];
+        let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
+        let buffer = create_buffer(s, cursors);
         let buffer = buffer.delete();
 
         assert_eq!(buffer.contents.as_ref(), "bcdf\nfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh");
         for (a, b) in buffer.cursors.iter().zip(&[Selection{start: 0, offset: 0}, Selection{start: 3, offset: 0}, Selection{start: 5, offset: 0}]) {
             assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn test_nowrap_lines() {
+        let cursors = vec![];
+        let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
+        let buffer = create_buffer(s, cursors);
+        let (a, _) = buffer.nowrap_lines(0, 1);
+
+        let s = "abcdef\n";
+        for (a, b) in a.zip(s.chars()) {
+            let c: Vec<char> = a.chars().collect();
+            assert!(c.len() == 1);
+            assert_eq!(c[0], b);
+        }
+    }
+
+    #[test]
+    fn test_nowrap_lines_snd() {
+        let cursors = vec![];
+        let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
+        let buffer = create_buffer(s, cursors);
+        let (a, _) = buffer.nowrap_lines(1, 3);
+
+        let s = "jfkdsalfjads\nkadsjlfla\n";
+        for (a, b) in a.zip(s.chars()) {
+            let c: Vec<char> = a.chars().collect();
+            assert!(c.len() == 1);
+            assert_eq!(c[0], b);
+        }
+    }
+
+    #[test]
+    fn test_nowrap_lines_end() {
+        // no newline ending case
+        let cursors = vec![];
+        let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
+        let buffer = create_buffer(s, cursors);
+        let (a, _) = buffer.nowrap_lines(5, 6);
+
+        let s = "aghigh";
+        for (a, b) in a.zip(s.chars()) {
+            let c: Vec<char> = a.chars().collect();
+            assert!(c.len() == 1);
+            assert_eq!(c[0], b);
+        }
+
+        // newline ending case
+        let cursors = vec![];
+        let buffer = create_buffer(s, cursors);
+        let (b, _) = buffer.nowrap_lines(5, 6);
+
+        let s = "aghigh\n";
+        for (a, b) in b.zip(s.chars()) {
+            let c: Vec<char> = a.chars().collect();
+            assert!(c.len() == 1);
+            assert_eq!(c[0], b);
         }
     }
 }
