@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::iter::Scan;
 
+use glium::glutin::surface::WindowSurface;
 use glium::program::ProgramCreationInput;
+use winit::dpi::LogicalSize;
 use log::error;
 use log::warn;
 use rusttype::Glyph;
@@ -252,7 +254,7 @@ const FONT_FRAGMENT_SHADER_SOURCE: &str = r#"
     }
 "#;
 
-const CURSOR_VERTEX_SHADER_SOURCE: &str = r#"
+const RECTANGLE_VERTEX_SHADER_SOURCE: &str = r#"
     #version 140
 
     in vec2 position;
@@ -262,13 +264,14 @@ const CURSOR_VERTEX_SHADER_SOURCE: &str = r#"
     }
 "#;
 
-const CURSOR_FRAGMENT_SHADER_SOURCE: &str = r#"
+const RECTANGLE_FRAGMENT_SHADER_SOURCE: &str = r#"
     #version 140
 
-    out vec4 color;
+    uniform vec4 color;
+    out vec4 c;
 
     void main() {
-        color = vec4(1.0, 0.2, 0.2, 1.0); // Red color
+        c = color;
     }
 "#;
 
@@ -288,11 +291,12 @@ pub struct CursorVertex {
 implement_vertex!(CursorVertex, position);
 
 pub struct Display {
-    glium_display: glium::Display,
-    cursor_program: Program,
+    glium_display: glium::Display<WindowSurface>,
+    rectangle_program: Program,
     font_program: Program,
     atlas_texture: Texture2d,
     glyph_info: GlyphInfo,
+    size: LogicalSize<u32>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -309,9 +313,8 @@ impl<T: Add<Output = T>> Add for Point<T> {
 }
 
 impl Display {
-    pub fn new(glyph_atlas: GlyphAtlas, window: glutin::WindowedContext<glutin::NotCurrent>) -> Self {
-        let display = glium::Display::from_gl_window(window).expect("unable to create display");
-
+    pub fn new(glyph_atlas: GlyphAtlas, display: glium::Display<WindowSurface>, size: LogicalSize<u32>) -> Self {
+        terminal_render(glyph_atlas.width, glyph_atlas.height, &glyph_atlas.buffer);
         let raw_image = glium::texture::RawImage2d::from_raw_rgba(glyph_atlas.buffer, (glyph_atlas.width as u32, glyph_atlas.height as u32));
         let texture = Texture2d::new(&display, raw_image).expect("unable to create 2d texture");
         let font_program = Program::new(
@@ -330,8 +333,8 @@ impl Display {
         let cursor_program = Program::new(
             &display, 
             ProgramCreationInput::SourceCode {
-                vertex_shader: CURSOR_VERTEX_SHADER_SOURCE, 
-                fragment_shader: CURSOR_FRAGMENT_SHADER_SOURCE, 
+                vertex_shader: RECTANGLE_VERTEX_SHADER_SOURCE, 
+                fragment_shader: RECTANGLE_FRAGMENT_SHADER_SOURCE, 
                 geometry_shader: None,
                 tessellation_control_shader: None,
                 tessellation_evaluation_shader: None,
@@ -340,7 +343,7 @@ impl Display {
                 uses_point_size: false,
             }).expect("unable to create program");
 
-        Self {glyph_info: glyph_atlas.map, glium_display: display, cursor_program, font_program, atlas_texture: texture}
+        Self {size, glyph_info: glyph_atlas.map, glium_display: display, rectangle_program: cursor_program, font_program, atlas_texture: texture}
     }
 
     // The letter `T`
@@ -395,7 +398,6 @@ impl Display {
     }
 
     fn glyph_data2glyph_vertex_buffers(&self, glyphs: Vec<(PositionedGlyph, Option<&GlyphData>)>) -> (Vec<Vertex>, Vec<u32>) {
-        let window = self.glium_display.gl_window().window().inner_size();
         let mut vertices = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
 
@@ -403,12 +405,12 @@ impl Display {
         for (glyph, glyph_data) in glyphs {
             if let Some(glyph_data) = glyph_data {
                 if let Some(bbox) = glyph.pixel_bounding_box() {
-                    let x = (bbox.min.x as f32 / window.width as f32) * 2.0 - 1.;
-                    let y = ((bbox.min.y as f32) / window.height as f32) * -2.0 + 1.;
+                    let x = (bbox.min.x as f32 / self.size.width as f32) * 2.0 - 1.;
+                    let y = ((bbox.min.y as f32) / self.size.height as f32) * -2.0 + 1.;
                     let top_left = rusttype::point(x, y);
 
-                    let new_width = (glyph_data.width as f32 / window.width as f32) * 2.0;
-                    let new_height = (glyph_data.height as f32 / window.height as f32) * 2.0;
+                    let new_width = (glyph_data.width as f32 / self.size.width as f32) * 2.0;
+                    let new_height = (glyph_data.height as f32 / self.size.height as f32) * 2.0;
 
                     vertices.push(Vertex { position: [top_left.x, top_left.y - new_height], tex_coords: glyph_data.tex_pos[0] });
                     vertices.push(Vertex { position: [top_left.x, top_left.y], tex_coords: glyph_data.tex_pos[1] });
@@ -432,7 +434,7 @@ impl Display {
     }
 
     fn mid_glyph_positions2cursor_vertex_buffers(&self, buffer: &TextBuffer, glyph_positions: Vec<(f32, f32)>, line_height: f32, start_grapheme_index: usize, end_grapheme_index: usize) -> (Vec<CursorVertex>, Vec<u32>) {
-        let window_size = self.glium_display.gl_window().window().inner_size();
+        let window_size = self.size;
         let line_height = 2.*line_height/window_size.height as f32;
 
         let mut vertex_list = Vec::new();
@@ -442,7 +444,7 @@ impl Display {
                 let (left, top) = glyph_positions[cursor.start - start_grapheme_index];
                 let [top, left] = [-2.*top/window_size.height as f32+1., 2.*left/window_size.width as f32-1.];
                 let index = vertex_list.len();
-                let cursor_width = 2.*(2.2)/window_size.width as f32; // TODO: hardcoded cursor width based on glyph
+                let cursor_width = 2.*(1.7)/window_size.width as f32; // TODO: hardcoded cursor width based on glyph
                 vertex_list.push(CursorVertex { position: [left - cursor_width, top - line_height]});
                 vertex_list.push(CursorVertex { position: [left + cursor_width, top - line_height]});
                 vertex_list.push(CursorVertex { position: [left + cursor_width, top]});
@@ -462,7 +464,7 @@ impl Display {
         (vertex_list, triangle_list)
     }
 
-    pub fn draw(&self, font_size: f32, font: &Font, offset_y: f32, offset_x: f32, buffer: &TextBuffer, bg_color: (f32, f32, f32, f32)) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn draw(&self, font_size: f32, font: &Font, offset_y: f32, titlebar_height: f32, offset_x: f32, buffer: &TextBuffer, bg_color: (f32, f32, f32, f32)) -> Result<(), Box<dyn std::error::Error>> {
         let scale = rusttype::Scale::uniform(font_size);
         // 1. pick lines that are relevant -> iterator of lines (each is an iterator of graphemes)
         // 2. lines iterator -> glyph data + mid-glyph positions
@@ -472,12 +474,12 @@ impl Display {
 
         // 1. ============================================================
         // 0,0 is top left, positive y goes down
-        let window_size = self.glium_display.gl_window().window().inner_size();
+        let window_size = self.size;
         let v_metrics = font.v_metrics(scale);
         let line_height = v_metrics.ascent - v_metrics.descent;
         let total_line_height = line_height + v_metrics.line_gap;
-        // (line_nr+1)*(total_line_height) - y_offset > 0 means next line starts below top of screen
-        let start_line = (offset_y/(total_line_height) - 1.).ceil().max(0.) as usize;
+        // (line_nr+1)*(total_line_height) - y_offset > titlebar_height means next line starts below top of screen
+        let start_line = ((offset_y + titlebar_height)/(total_line_height) - 1.).ceil().max(0.) as usize;
         // (line_nr)*(total_line_height) - y_offset > winow.height means line starts below bottom of screen
         let last_line = ((window_size.height as f32 + offset_y)/total_line_height).ceil() as usize;
 
@@ -492,11 +494,21 @@ impl Display {
         let (vertex_list, triangle_list) = self.glyph_data2glyph_vertex_buffers(glyph_data);
         let glyph_vertex_buffer = VertexBuffer::new(&self.glium_display, &vertex_list[..])?;
         let glyph_index_buffer = IndexBuffer::new(&self.glium_display, PrimitiveType::TrianglesList, &triangle_list[..])?;
+        let glyph_uniform = uniform! { tex: &self.atlas_texture };
 
         // 4. =============================================================
         let (vertex_list, triangle_list) = self.mid_glyph_positions2cursor_vertex_buffers(buffer, mid_glyph_positions, line_height, start_grapheme_index, end_grapheme_index);
         let cursor_vertex_buffer = VertexBuffer::new(&self.glium_display, &vertex_list[..])?;
         let cursor_index_buffer = IndexBuffer::new(&self.glium_display, PrimitiveType::TrianglesList, &triangle_list[..])?;
+        let cursor_uniform = uniform! {color: [1.0f32, 0.2, 0.2, 1.0]};
+
+
+        // titlebar
+        let coords = [[0., 0.], [window_size.width as f32, 0.], [0., titlebar_height], [window_size.width as f32, titlebar_height]];
+        let coords = coords.map(|[a, b]| CursorVertex{position: [a/(window_size.width as f32)*2.-1., -b/(window_size.height as f32)*2.+1.]});
+        let titlebar_vertex_buffer = VertexBuffer::new(&self.glium_display, &coords)?;
+        let titlebar_index_buffer = IndexBuffer::new(&self.glium_display, PrimitiveType::TrianglesList, &[0u32, 1u32, 2u32, 1u32, 2u32, 3u32])?;
+        let titlebar_uniform = uniform! {color: [0.5f32, 0.0, 0.2, 0.1]};
 
         // 5. =============================================================
         let mut target = self.glium_display.draw();
@@ -504,14 +516,15 @@ impl Display {
 
         let glyph_draw_parameters = glium::DrawParameters {
             blend: Blend::alpha_blending(),
+            smooth: Some(glium::draw_parameters::Smooth::Nicest),
             .. Default::default()
         };
 
         // Bind the vertex buffer, index buffer, texture, and program
-        let glyph_uniform = uniform! { tex: &self.atlas_texture };
         target.draw(&glyph_vertex_buffer, &glyph_index_buffer, &self.font_program, &glyph_uniform, &glyph_draw_parameters)?;
-        let cursor_uniform = glium::uniforms::EmptyUniforms;
-        target.draw(&cursor_vertex_buffer, &cursor_index_buffer, &self.cursor_program, &cursor_uniform, &Default::default())?;
+        target.draw(&cursor_vertex_buffer, &cursor_index_buffer, &self.rectangle_program, &cursor_uniform, &Default::default())?;
+        target.draw(&titlebar_vertex_buffer, &titlebar_index_buffer, &self.rectangle_program, &titlebar_uniform, &Default::default())?;
+
 
         // ======================================================================
         // Finish the frame

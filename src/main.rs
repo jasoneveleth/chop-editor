@@ -1,12 +1,24 @@
 use std::env;
+use std::num::NonZeroU32;
 
+use glium::glutin::config::ConfigTemplateBuilder;
+use raw_window_handle::HasRawWindowHandle;
 use rusttype::Font; 
-use glutin::dpi::{LogicalSize, PhysicalPosition};
-use glutin::event::WindowEvent::{CloseRequested, MouseWheel, ModifiersChanged, ReceivedCharacter,KeyboardInput};
-use glutin::event::{Event, MouseScrollDelta, ModifiersState, ElementState};
-use log::{info, warn, error, debug};
+use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::event::WindowEvent;
+use winit::event::{Event, MouseScrollDelta, ElementState};
+use winit::event_loop::EventLoop;
+use winit::window::WindowBuilder;
+use winit::keyboard::{Key, NamedKey};
+use glutin_winit::DisplayBuilder;
+use winit::platform::macos::WindowBuilderExtMacOS;
+use glutin::surface::WindowSurface;
+use glutin::context::ContextAttributesBuilder;
+use glutin::display::GetGlDisplay;
+use glutin::prelude::*;
+use glutin::surface::SurfaceAttributesBuilder;
 
-// use pager::render::terminal_render;
+use pager::render::terminal_render;
 use pager::render::GlyphAtlas;
 use pager::render::Display;
 use pager::buffer::TextBuffer;
@@ -15,16 +27,16 @@ fn main() {
     env_logger::init();
     let args: Vec<String> = env::args().collect();
     if args.len() <= 1 {
-        error!("not enough args provided");
+        log::error!("not enough args provided");
         std::process::exit(1);
     }
-    let file_path = &args[1];
+    let file_path = &env::args().collect::<Vec<_>>()[1];
 
     let font_data = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
     let font = Font::try_from_bytes(font_data).expect("Error loading font");
-    let font_size = 50.0;
-    // let font_color = (0xab, 0xb2, 0xbf);
-    let font_color = (0x00, 0x00, 0x00);
+    let font_size = 20.0;
+    let font_color = (0xab, 0xb2, 0xbf);
+    // let font_color = (0x00, 0x00, 0x00);
     let font_color = (font_color.0 as f32 / 255.0, font_color.1 as f32 / 255.0, font_color.2 as f32 / 255.0);
     let font_color = font_color;
     let atlas = GlyphAtlas::from_font(&font, font_size, font_color);
@@ -33,137 +45,133 @@ fn main() {
         // terminal_render(atlas.width, atlas.height, &atlas.buffer);
         run(atlas, font, font_size, buffer);
     } else {
-        error!("file doesn't exist");
+        log::error!("file doesn't exist");
         std::process::exit(1);
     }
 }
 
 fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer: TextBuffer) {
     let size = LogicalSize {width: 800, height: 600};
-    let title = "My Boi";
 
-    let wb = glutin::window::WindowBuilder::new().with_inner_size(size).with_title(title);
-    let event_loop = glutin::event_loop::EventLoop::new();
-    let cb = glutin::ContextBuilder::new();
-    let window = cb.with_srgb(true).build_windowed(wb, &event_loop).expect("unable to create window");
+    let wb = WindowBuilder::new()
+        .with_inner_size(size)
+        .with_transparent(true)
+        .with_titlebar_transparent(true)
+        .with_fullsize_content_view(true)
+        .with_title_hidden(true);
 
-    let display = Display::new(glyph_atlas, window);
-    let y_padding = 6.0;
-    let x_padding = 6.0;
+    let event_loop = EventLoop::new().unwrap();
+    let config_template_builder = ConfigTemplateBuilder::new();
+    let display_builder = DisplayBuilder::new().with_window_builder(Some(wb));
+
+    let (window, gl_config) = display_builder.build(&event_loop, config_template_builder, |mut configs| {
+            // Just use the first configuration since we don't have any special preferences here
+            configs.next().unwrap()
+        })
+        .unwrap();
+    let window = window.unwrap();
+    let raw_window_handle = window.raw_window_handle();
+    let context_attributes = ContextAttributesBuilder::new().build(Some(raw_window_handle));
+
+    let not_current_gl_context = Some(unsafe {
+        gl_config.display().create_context(&gl_config, &context_attributes).unwrap()
+    });
+
+    // Determine our framebuffer size based on the window size, or default to 800x600 if it's invisible
+    let (width, height): (u32, u32) = window.inner_size().into();
+    let attrs = SurfaceAttributesBuilder::<WindowSurface>::new().build(
+        raw_window_handle,
+        NonZeroU32::new(width).unwrap(),
+        NonZeroU32::new(height).unwrap(),
+    );
+    // Now we can create our surface, use it to make our context current and finally create our display
+
+    let surface = unsafe { gl_config.display().create_window_surface(&gl_config, &attrs).unwrap() };
+    let context = not_current_gl_context.unwrap().make_current(&surface).unwrap();
+    let display = glium::Display::new(context, surface).unwrap();
+
+    let display = Display::new(glyph_atlas, display, size);
+
+    let titlebar_height = 28.;
+    let y_padding = 4.0 + titlebar_height;
+    let x_padding = 10.0;
     let mut scroll_y = -y_padding; // we want to scroll beyond the top (ie. negative)
 
-    let mut modifier_state = ModifiersState::default();
-
-    let color = (0xFA, 0xFA, 0xFA);
-    // let color = (0x28, 0x2c, 0x34);
+    // let color = (0xFA, 0xFA, 0xFA);
+    let color = (0x28, 0x2c, 0x34);
     // let color = ((color.0 as f32 / 255.0).powf(2.2), (color.1 as f32 / 255.0).powf(2.2), (color.2 as f32 / 255.0).powf(2.2));
     let color = ((color.0 as f32 / 255.0), (color.1 as f32 / 255.0), (color.2 as f32 / 255.0));
     let (r, g, b) = color;
     let background_color = (r, g, b, 1.0);
 
-    event_loop.run(move |ev, _, control_flow| {
-        // this ensures we come through the event loop again in at most 16ms (wait for 16ms or an
-        // event, whichever is sooner)
-        // let next_frame_time = std::time::Instant::now() + std::time::Duration::from_nanos(16_666_667);
-        // *control_flow = glutin::event_loop::ControlFlow::WaitUntil(next_frame_time);
-
+    event_loop.run(move |ev, elwt| {
         match ev {
             Event::WindowEvent { event, .. } => match event {
-                CloseRequested => {
-                    info!("close requested");
-                    *control_flow = glutin::event_loop::ControlFlow::Exit;
-                    return;
+                WindowEvent::CloseRequested => {
+                    log::info!("close requested");
+                    elwt.exit();
                 },
-                MouseWheel{delta, ..} => {
+                WindowEvent::MouseWheel{delta, ..} => {
                     match delta {
                         MouseScrollDelta::LineDelta(_, y) => {
                             // Adjust the scroll position based on the scroll delta
                             scroll_y -= y * 20.0; // Adjust the scroll speed as needed
-                            warn!("we don't expect a linedelta from mouse scroll on macOS, ignoring");
+                            log::warn!("we don't expect a linedelta from mouse scroll on macOS, ignoring");
                         },
                         MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
                             scroll_y -= y as f32;
                             // we want to scroll past the top (ie. negative)
                             let scale = rusttype::Scale::uniform(font_size);
                             let line_height = font.v_metrics(scale).ascent - font.v_metrics(scale).descent + font.v_metrics(scale).line_gap;
-                            scroll_y = scroll_y.max(-y_padding).min((buffer.num_lines()-1) as f32 *line_height);
-                            match display.draw(font_size, &font, scroll_y, x_padding, &buffer, background_color) {
-                                Err(err) => error!("problem drawing: {:?}", err),
+                            scroll_y = scroll_y.max(-y_padding).min((buffer.num_lines()-1) as f32 *line_height - titlebar_height);
+                            match display.draw(font_size, &font, scroll_y, titlebar_height, x_padding, &buffer, background_color) {
+                                Err(err) => log::error!("problem drawing: {:?}", err),
                                 _ => ()
                             }
                         },
                     }
                 },
-                ReceivedCharacter(ch) => {
-                    let mut need_redraw = false;
-                    match ch {
-                        'w' => {
-                            if modifier_state.contains(ModifiersState::LOGO) {
-                                // Cmd+W combination pressed
-                                info!("close requested");
-                                *control_flow = glutin::event_loop::ControlFlow::Exit;
-                                return;
-                            } else {
-                                buffer = buffer.insert("w");
-                                need_redraw = true;
-                            }
-                        },
-                        '\r' => {
-                            buffer = buffer.insert("\n");
-                            need_redraw = true;
-                        },
-                        '\x7f' => {
-                            buffer = buffer.delete();
-                            need_redraw = true;
-                        },
-                        _ => {
-                            if ch.is_ascii() {
-                                let text = &format!("{ch}");
-                                debug!("{}", text);
-                                buffer = buffer.insert(text);
-                                need_redraw = true;
-                            }
-                        }
-                    }
-                    if need_redraw {
-                        match display.draw(font_size, &font, scroll_y, x_padding, &buffer, background_color) {
-                            Err(err) => error!("problem drawing: {:?}", err),
-                            _ => ()
-                        }
-                    }
-                }
-                ModifiersChanged(state) => {
-                    modifier_state = state;
+                WindowEvent::ModifiersChanged(_state) => {
+                    ()
                 },
-                KeyboardInput{device_id: _, input, is_synthetic: _} => {
+                WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
                     let mut need_redraw = false;
-                    if input.state == ElementState::Released {
-                        match input.scancode {
-                            // 126 => buffer = buffer.up(),
-                            123 => buffer = buffer.move_horizontal(-1),
-                            // 125 => buffer = buffer.down(),
-                            124 => buffer = buffer.move_horizontal(1),
-                            _ => (),
+                    if event.state != ElementState::Released {
+                        match event.logical_key {
+                            Key::Character(s) => {
+                                buffer = buffer.insert(s.as_str());
+                            },
+                            Key::Named(n) => {
+                                match n {
+                                    NamedKey::Enter => buffer = buffer.insert("\n"),
+                                    NamedKey::ArrowLeft => buffer = buffer.move_horizontal(-1),
+                                    NamedKey::ArrowRight => buffer = buffer.move_horizontal(1),
+                                    NamedKey::Space => buffer = buffer.insert(" "),
+                                    NamedKey::Backspace => buffer = buffer.delete(),
+                                    a => {dbg!(a);},
+                                }
+                            }
+                            a => {dbg!(a);},
                         }
                         need_redraw = true;
                     }
                     if need_redraw {
-                        match display.draw(font_size, &font, scroll_y, x_padding, &buffer, background_color) {
-                            Err(err) => error!("problem drawing: {:?}", err),
+                        match display.draw(font_size, &font, scroll_y, titlebar_height, x_padding, &buffer, background_color) {
+                            Err(err) => log::error!("problem drawing: {:?}", err),
                             _ => ()
                         }
                     }
                 },
+                WindowEvent::RedrawRequested => {
+                    log::info!("redraw requested");
+                    match display.draw(font_size, &font, scroll_y, titlebar_height, x_padding, &buffer, background_color) {
+                        Err(err) => log::error!("problem drawing: {:?}", err),
+                        _ => ()
+                    }
+                },
                 _ => (),
             },
-            Event::RedrawRequested(_window_id) => {
-                info!("redraw requested");
-                match display.draw(font_size, &font, scroll_y, x_padding, &buffer, background_color) {
-                    Err(err) => error!("problem drawing: {:?}", err),
-                    _ => ()
-                }
-            }
             _ => (),
         }
-    });
+    }).unwrap();
 }
