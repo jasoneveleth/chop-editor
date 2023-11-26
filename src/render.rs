@@ -3,6 +3,7 @@ use std::iter::Scan;
 
 use glium::glutin::surface::WindowSurface;
 use glium::program::ProgramCreationInput;
+use unicode_segmentation::UnicodeSegmentation;
 use winit::dpi::LogicalSize;
 use log::error;
 use log::warn;
@@ -24,6 +25,7 @@ use unicode_segmentation::Graphemes;
 use std::ops::Add;
 
 use log::debug;
+pub const FONT_SCALE_OFFSET: f32 = 2.;
 
 use term_size;
 
@@ -79,6 +81,7 @@ pub fn terminal_render(width: usize, height: usize, buffer: &[u8]) {
 }
 
 pub struct GlyphData {
+    voffset: i32,
     width: usize,
     height: usize,
     tex_pos: [[f32; 2]; 4],
@@ -132,21 +135,15 @@ fn char2hex(c: char) -> String {
     bytes.bytes().fold(String::new(), |acc, byte| acc + &format!("\\x{:x}", byte))
 }
 
-// Function to check if a character is a variation selector
-fn is_variation_selector(c: &char) -> bool {
-    let variation_selector_range = '\u{FE00}'..='\u{FE0F}';
-    variation_selector_range.contains(c)
-}
-
 impl GlyphAtlas {
     pub fn from_font(font: &Font, font_size: f32, font_color: (f32, f32, f32)) -> Self {
-        let scale = Scale::uniform(font_size);
+        let scale = Scale::uniform(font_size*FONT_SCALE_OFFSET);
 
         // let all_chars = "ab❤️";
         let all_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ`1234567890-=~!@#$%^&*()_+[]\\{}|;':\",./<>?";
 
-        // we are skipping variation selectors for emojis since I'm not very smart
-        let all_glyphs: Vec<rusttype::PositionedGlyph> = all_chars.chars().filter(|x| !is_variation_selector(x)).map(|c| {
+        let all_glyphs: Vec<_> = UnicodeSegmentation::graphemes(all_chars, true).map(|c| {
+            let c = c.chars().nth(0).unwrap();
             let glyph = font.glyph(c);
 
             // the glyph id for a glyph that isn't defined is 0
@@ -217,7 +214,8 @@ impl GlyphAtlas {
                 let dims = rusttype::Rect { min: top_left, max: bottom_right};
 
                 let tex_pos = dims2pos(width_pixels, height_pixels, dims);
-                map.insert(c, GlyphData{width: glyph_width, height: glyph_height, tex_pos});
+                dbg!(c, bbox.max);
+                map.insert(c, GlyphData{width: glyph_width, height: glyph_height, tex_pos, voffset: bbox.max.y});
 
                 curr_x += glyph_width+1;
             } else {
@@ -409,13 +407,14 @@ impl Display {
                     let y = ((bbox.min.y as f32) / self.size.height as f32) * -2.0 + 1.;
                     let top_left = rusttype::point(x, y);
 
-                    let new_width = (glyph_data.width as f32 / self.size.width as f32) * 2.0;
-                    let new_height = (glyph_data.height as f32 / self.size.height as f32) * 2.0;
+                    let new_width = (glyph_data.width as f32 / self.size.width as f32 / FONT_SCALE_OFFSET) * 2.0;
+                    let new_height = (glyph_data.height as f32 / self.size.height as f32 / FONT_SCALE_OFFSET) * 2.0;
 
-                    vertices.push(Vertex { position: [top_left.x, top_left.y - new_height], tex_coords: glyph_data.tex_pos[0] });
-                    vertices.push(Vertex { position: [top_left.x, top_left.y], tex_coords: glyph_data.tex_pos[1] });
-                    vertices.push(Vertex { position: [top_left.x + new_width, top_left.y], tex_coords: glyph_data.tex_pos[2] });
-                    vertices.push(Vertex { position: [top_left.x + new_width, top_left.y - new_height], tex_coords: glyph_data.tex_pos[3] });
+                    let voffset = (glyph_data.voffset as f32 / FONT_SCALE_OFFSET) / self.size.height as f32 * 2.0;
+                    vertices.push(Vertex { position: [top_left.x, top_left.y - new_height + voffset], tex_coords: glyph_data.tex_pos[0] });
+                    vertices.push(Vertex { position: [top_left.x, top_left.y + voffset], tex_coords: glyph_data.tex_pos[1] });
+                    vertices.push(Vertex { position: [top_left.x + new_width, top_left.y + voffset], tex_coords: glyph_data.tex_pos[2] });
+                    vertices.push(Vertex { position: [top_left.x + new_width, top_left.y - new_height + voffset], tex_coords: glyph_data.tex_pos[3] });
 
                     // a list of triangles of vertex indices
                     // triangle 1
