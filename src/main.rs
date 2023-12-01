@@ -1,7 +1,7 @@
 use std::env;
 use std::num::NonZeroU32;
 
-use glium::glutin::config::ConfigTemplateBuilder;
+use glutin::config::ConfigTemplateBuilder;
 use raw_window_handle::HasRawWindowHandle;
 use rusttype::Font; 
 use winit::dpi::{LogicalSize, PhysicalPosition};
@@ -36,9 +36,9 @@ fn main() {
 
     let font_data = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
     let font = Font::try_from_bytes(font_data).expect("Error loading font");
-    let font_size = 17.0;
-    let font_color = (0xab, 0xb2, 0xbf);
-    // let font_color = (0x00, 0x00, 0x00);
+    let font_size = 20.0;
+    // let font_color = (0xab, 0xb2, 0xbf);
+    let font_color = (0x00, 0x00, 0x00);
     let font_color = (font_color.0 as f32 / 255.0, font_color.1 as f32 / 255.0, font_color.2 as f32 / 255.0);
     let font_color = font_color;
     let atlas = GlyphAtlas::from_font(&font, font_size, font_color);
@@ -97,14 +97,11 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
     let x_padding = 10.0;
     let mut scroll_y = -y_padding; // we want to scroll beyond the top (ie. negative)
 
-    // let color = (0xFA, 0xFA, 0xFA);
-    let color = (0x28, 0x2c, 0x34);
-    // let color = ((color.0 as f32 / 255.0).powf(2.2), (color.1 as f32 / 255.0).powf(2.2), (color.2 as f32 / 255.0).powf(2.2));
-    let color = ((color.0 as f32 / 255.0), (color.1 as f32 / 255.0), (color.2 as f32 / 255.0));
-    let (r, g, b) = color;
-    let background_color = [r, g, b, 1.0];
+    let color = (0xFA, 0xFA, 0xFA);
+    // let color = (0x28, 0x2c, 0x34);
+    let bg_color = [color.0 as f32 / 255., color.1 as f32 / 255., color.2 as f32 / 255., 1.0];
 
-    let window_things = WindowConfig::new(font_size, font, titlebar_height, x_padding, background_color);
+    let window_things = WindowConfig::new(font_size, font, titlebar_height, x_padding, bg_color);
 
     let display = Display::new(glyph_atlas, display, window, window_things);
 
