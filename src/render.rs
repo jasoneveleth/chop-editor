@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::iter::Scan;
 
 use glium::glutin::surface::WindowSurface;
-use glium::program::ProgramCreationInput;
+use rusttype::Rect;
 use unicode_segmentation::UnicodeSegmentation;
 use winit::dpi::LogicalSize;
+use winit::window::Window;
 use log::error;
 use log::warn;
 use rusttype::Glyph;
 use rusttype::GlyphId;
-use rusttype::PositionedGlyph;
 use rusttype::Scale; 
 use rusttype::point;
 use rusttype::Font; 
@@ -25,7 +25,10 @@ use unicode_segmentation::Graphemes;
 use std::ops::Add;
 
 use log::debug;
-pub const FONT_SCALE_OFFSET: f32 = 2.;
+
+// We can make everything look clearer if we render larger font, and then
+// let the GPU scale it down
+pub const FONT_SCALE_OFFSET: f32 = 3.;
 
 use term_size;
 
@@ -81,13 +84,11 @@ pub fn terminal_render(width: usize, height: usize, buffer: &[u8]) {
 }
 
 pub struct GlyphData {
-    voffset: i32,
-    width: usize,
-    height: usize,
+    bbox: Rect<f32>,
     tex_pos: [[f32; 2]; 4],
 }
 
-pub type GlyphInfo = HashMap<char, GlyphData>;
+pub type GlyphInfo = HashMap<char, [[f32; 2]; 4]>;
 
 // We can get a bitmap from a character and a font
 pub struct GlyphAtlas {
@@ -214,8 +215,7 @@ impl GlyphAtlas {
                 let dims = rusttype::Rect { min: top_left, max: bottom_right};
 
                 let tex_pos = dims2pos(width_pixels, height_pixels, dims);
-                dbg!(c, bbox.max);
-                map.insert(c, GlyphData{width: glyph_width, height: glyph_height, tex_pos, voffset: bbox.max.y});
+                map.insert(c, tex_pos);
 
                 curr_x += glyph_width+1;
             } else {
@@ -288,19 +288,34 @@ pub struct CursorVertex {
 
 implement_vertex!(CursorVertex, position);
 
-pub struct Display {
+pub struct Display<'a> {
     glium_display: glium::Display<WindowSurface>,
     rectangle_program: Program,
     font_program: Program,
     atlas_texture: Texture2d,
     glyph_info: GlyphInfo,
-    size: LogicalSize<u32>,
+    pub window: Window,
+    window_config: WindowConfig<'a>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 struct Point<T> {
     x: T,
     y: T,
+}
+
+pub struct WindowConfig<'a> {
+    pub font_size: f32,
+    pub font: Font<'a>,
+    pub titlebar_height: f32,
+    pub x_padding: f32,
+    pub background_color: [f32; 4],
+}
+
+impl<'a> WindowConfig<'a> {
+    pub fn new(font_size: f32, font: Font<'a>, titlebar_height: f32, x_padding: f32, background_color: [f32; 4]) -> Self {
+        WindowConfig {font_size, font, titlebar_height, x_padding, background_color}
+    }
 }
 
 impl<T: Add<Output = T>> Add for Point<T> {
@@ -310,38 +325,31 @@ impl<T: Add<Output = T>> Add for Point<T> {
     }
 }
 
-impl Display {
-    pub fn new(glyph_atlas: GlyphAtlas, display: glium::Display<WindowSurface>, size: LogicalSize<u32>) -> Self {
+impl<'b> Display<'b> {
+    pub fn new(glyph_atlas: GlyphAtlas, display: glium::Display<WindowSurface>, window: Window, window_config: WindowConfig<'b>) -> Self {
         terminal_render(glyph_atlas.width, glyph_atlas.height, &glyph_atlas.buffer);
         let raw_image = glium::texture::RawImage2d::from_raw_rgba(glyph_atlas.buffer, (glyph_atlas.width as u32, glyph_atlas.height as u32));
         let texture = Texture2d::new(&display, raw_image).expect("unable to create 2d texture");
-        let font_program = Program::new(
-            &display, 
-            ProgramCreationInput::SourceCode {
-                vertex_shader: FONT_VERTEX_SHADER_SOURCE, 
-                fragment_shader: FONT_FRAGMENT_SHADER_SOURCE, 
-                geometry_shader: None,
-                tessellation_control_shader: None,
-                tessellation_evaluation_shader: None,
-                transform_feedback_varyings: None,
-                outputs_srgb: true, // <- This seems to fix the issue
-                uses_point_size: false,
-            }).expect("unable to create program");
 
-        let cursor_program = Program::new(
-            &display, 
-            ProgramCreationInput::SourceCode {
-                vertex_shader: RECTANGLE_VERTEX_SHADER_SOURCE, 
-                fragment_shader: RECTANGLE_FRAGMENT_SHADER_SOURCE, 
-                geometry_shader: None,
-                tessellation_control_shader: None,
-                tessellation_evaluation_shader: None,
-                transform_feedback_varyings: None,
-                outputs_srgb: true, // <- This seems to fix the issue
-                uses_point_size: false,
-            }).expect("unable to create program");
+        let font_program = Program::from_source(&display, FONT_VERTEX_SHADER_SOURCE, FONT_FRAGMENT_SHADER_SOURCE, None).unwrap();
+        let cursor_program = Program::from_source(&display, RECTANGLE_VERTEX_SHADER_SOURCE, RECTANGLE_FRAGMENT_SHADER_SOURCE, None).unwrap();
+        Self {window, 
+            glyph_info: glyph_atlas.map,
+            glium_display: display,
+            rectangle_program: cursor_program,
+            font_program,
+            atlas_texture: texture,
+            window_config
+        }
+    }
 
-        Self {size, glyph_info: glyph_atlas.map, glium_display: display, rectangle_program: cursor_program, font_program, atlas_texture: texture}
+    pub fn size(&self) -> LogicalSize<f32> {
+        let logical = LogicalSize::from_physical(self.window.inner_size(), self.window.scale_factor());
+        logical
+    }
+
+    pub fn font(&self) -> &Font {
+        &self.window_config.font
     }
 
     // The letter `T`
@@ -361,7 +369,7 @@ impl Display {
     // it down with an offset when laying it out. v_metrics.ascent is the
     // distance between the baseline and the highest edge of any glyph in
     // the font. That's enough to guarantee that there's no clipping.
-    fn graphemes2glyphs<'a>(&'a self, font: &Font<'a>, scale: Scale, text: Graphemes<'a>, offset_y: f32, offset_x: f32, total_line_height: f32) -> Scan<Graphemes, (Option<GlyphId>, f32), Box<dyn FnMut(&mut (Option<GlyphId>, f32), &str) -> Option<((PositionedGlyph<'a>, Option<&'a GlyphData>), (f32, f32))> + 'a>> {
+    fn graphemes2glyphs<'a>(&'a self, font: &Font<'a>, scale: Scale, text: Graphemes<'a>, offset_y: f32, offset_x: f32, total_line_height: f32) -> Scan<Graphemes, (Option<GlyphId>, f32), Box<dyn FnMut(&mut (Option<GlyphId>, f32), &str) -> Option<(Option<GlyphData>, (f32, f32))> + 'a>> {
         // the offset_y isn't to the top of the line, it's to the baseline 
         let mut line_start = point(offset_x, offset_y);
         let font = font.clone();
@@ -370,11 +378,9 @@ impl Display {
         text.scan((None, 0.0), Box::new(move |(prev, x): &mut (Option<GlyphId>, f32), g: &str| {
             // EMOJI: this may have more than 1 byte in it
             let ch = g.chars().nth(0).unwrap();
-            let glyph_data = self.glyph_info.get(&ch);
             let glyph: Glyph = font.glyphs_for(g.chars()).to_owned().nth(0).unwrap();
             let g = glyph.scaled(scale);
             let mut left_side_of_char = *x;
-            let top_of_char = line_start.y;
             if ch == '\n' {
                 line_start = line_start + rusttype::vector(0.0, total_line_height);
                 *x = 0.;
@@ -391,59 +397,65 @@ impl Display {
             if ch != '\n' {
                 *x += w;
             }
-            Some(((next, glyph_data), (line_start.x + left_side_of_char, top_of_char - ascent)))
+            let glyph_data = if let (Some(tex_pos), Some(bbox)) = (self.glyph_info.get(&ch), next.pixel_bounding_box()) {
+                let bbox = Rect{min: rusttype::Point{x: bbox.min.x as f32, y: bbox.min.y as f32}, max: rusttype::Point{x: bbox.max.x as f32, y: bbox.max.y as f32}};
+                Some(GlyphData {bbox, tex_pos: *tex_pos})
+            } else {
+                None
+            };
+            Some((glyph_data, (line_start.x + left_side_of_char, line_start.y - ascent)))
         }))
     }
 
-    fn glyph_data2glyph_vertex_buffers(&self, glyphs: Vec<(PositionedGlyph, Option<&GlyphData>)>) -> (Vec<Vertex>, Vec<u32>) {
+    fn glyph_data2glyph_vertex_buffers(&self, glyphs: Vec<Option<GlyphData>>) -> (Vec<Vertex>, Vec<u32>) {
+        let LogicalSize{width: window_width, height: window_height} = self.size();
         let mut vertices = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
 
         let mut index: u32 = 0;
-        for (glyph, glyph_data) in glyphs {
+        for glyph_data in glyphs {
             if let Some(glyph_data) = glyph_data {
-                if let Some(bbox) = glyph.pixel_bounding_box() {
-                    let x = (bbox.min.x as f32 / self.size.width as f32) * 2.0 - 1.;
-                    let y = ((bbox.min.y as f32) / self.size.height as f32) * -2.0 + 1.;
-                    let top_left = rusttype::point(x, y);
+                let bbox = glyph_data.bbox;
+                let x = ((bbox.min.x / FONT_SCALE_OFFSET) / window_width as f32) * 2.0 - 1.;
+                let y = ((bbox.min.y / FONT_SCALE_OFFSET) / window_height as f32) * -2.0 + 1.;
+                let top_left = rusttype::point(x, y);
 
-                    let new_width = (glyph_data.width as f32 / self.size.width as f32 / FONT_SCALE_OFFSET) * 2.0;
-                    let new_height = (glyph_data.height as f32 / self.size.height as f32 / FONT_SCALE_OFFSET) * 2.0;
+                let new_width = (glyph_data.bbox.width() / window_width as f32 / FONT_SCALE_OFFSET) * 2.0;
+                let new_height = (glyph_data.bbox.height() / window_height as f32 / FONT_SCALE_OFFSET) * 2.0;
 
-                    let voffset = (glyph_data.voffset as f32 / FONT_SCALE_OFFSET) / self.size.height as f32 * 2.0;
-                    vertices.push(Vertex { position: [top_left.x, top_left.y - new_height + voffset], tex_coords: glyph_data.tex_pos[0] });
-                    vertices.push(Vertex { position: [top_left.x, top_left.y + voffset], tex_coords: glyph_data.tex_pos[1] });
-                    vertices.push(Vertex { position: [top_left.x + new_width, top_left.y + voffset], tex_coords: glyph_data.tex_pos[2] });
-                    vertices.push(Vertex { position: [top_left.x + new_width, top_left.y - new_height + voffset], tex_coords: glyph_data.tex_pos[3] });
+                vertices.push(Vertex { position: [top_left.x, top_left.y - new_height], tex_coords: glyph_data.tex_pos[0] });
+                vertices.push(Vertex { position: [top_left.x, top_left.y], tex_coords: glyph_data.tex_pos[1] });
+                vertices.push(Vertex { position: [top_left.x + new_width, top_left.y], tex_coords: glyph_data.tex_pos[2] });
+                vertices.push(Vertex { position: [top_left.x + new_width, top_left.y - new_height], tex_coords: glyph_data.tex_pos[3] });
 
-                    // a list of triangles of vertex indices
-                    // triangle 1
-                    indices.push(index + 1);
-                    indices.push(index + 2);
-                    indices.push(index);
-                    // triangle 2
-                    indices.push(index);
-                    indices.push(index + 2);
-                    indices.push(index + 3);
-                    index += 4;
-            }
+                // a list of triangles of vertex indices
+                // triangle 1
+                indices.push(index + 1);
+                indices.push(index + 2);
+                indices.push(index);
+                // triangle 2
+                indices.push(index);
+                indices.push(index + 2);
+                indices.push(index + 3);
+                index += 4;
             }
         }
         (vertices, indices)
     }
 
     fn mid_glyph_positions2cursor_vertex_buffers(&self, buffer: &TextBuffer, glyph_positions: Vec<(f32, f32)>, line_height: f32, start_grapheme_index: usize, end_grapheme_index: usize) -> (Vec<CursorVertex>, Vec<u32>) {
-        let window_size = self.size;
-        let line_height = 2.*line_height/window_size.height as f32;
+        let window_size = self.size();
+        let line_height = 2.*line_height/FONT_SCALE_OFFSET/window_size.height as f32;
 
         let mut vertex_list = Vec::new();
         let mut triangle_list = Vec::new();
         for cursor in buffer.cursors.iter() {
             if start_grapheme_index <= cursor.start && cursor.start < end_grapheme_index {
                 let (left, top) = glyph_positions[cursor.start - start_grapheme_index];
-                let [top, left] = [-2.*top/window_size.height as f32+1., 2.*left/window_size.width as f32-1.];
+                let [top, left] = [-2.*top/FONT_SCALE_OFFSET/window_size.height as f32+1., 2.*left/FONT_SCALE_OFFSET/window_size.width as f32-1.];
                 let index = vertex_list.len();
-                let cursor_width = 2.*(1.7)/window_size.width as f32; // TODO: hardcoded cursor width based on glyph
+                let screen_pixel_width = 1.1; // TODO: hardcoded cursor width based on glyph
+                let cursor_width = 2.*(screen_pixel_width)/window_size.width as f32; 
                 vertex_list.push(CursorVertex { position: [left - cursor_width, top - line_height]});
                 vertex_list.push(CursorVertex { position: [left + cursor_width, top - line_height]});
                 vertex_list.push(CursorVertex { position: [left + cursor_width, top]});
@@ -463,8 +475,8 @@ impl Display {
         (vertex_list, triangle_list)
     }
 
-    pub fn draw(&self, font_size: f32, font: &Font, offset_y: f32, titlebar_height: f32, offset_x: f32, buffer: &TextBuffer, bg_color: (f32, f32, f32, f32)) -> Result<(), Box<dyn std::error::Error>> {
-        let scale = rusttype::Scale::uniform(font_size);
+    pub fn draw(&self, buffer: &TextBuffer, offset_y: f32, offset_x: f32) -> Result<(), Box<dyn std::error::Error>> {
+        let scale = rusttype::Scale::uniform(self.window_config.font_size * FONT_SCALE_OFFSET);
         // 1. pick lines that are relevant -> iterator of lines (each is an iterator of graphemes)
         // 2. lines iterator -> glyph data + mid-glyph positions
         // 3. glyph data --> vertex + index buffers
@@ -473,19 +485,23 @@ impl Display {
 
         // 1. ============================================================
         // 0,0 is top left, positive y goes down
-        let window_size = self.size;
-        let v_metrics = font.v_metrics(scale);
+        let window_size = self.size();
+        let v_metrics = self.window_config.font.v_metrics(scale);
         let line_height = v_metrics.ascent - v_metrics.descent;
+        // adjust for FONT_SCALE_OFFSET to get pixels
         let total_line_height = line_height + v_metrics.line_gap;
+        let offset_y = offset_y*FONT_SCALE_OFFSET;
+        let offset_x = offset_x*FONT_SCALE_OFFSET;
+
         // (line_nr+1)*(total_line_height) - y_offset > titlebar_height means next line starts below top of screen
-        let start_line = ((offset_y + titlebar_height)/(total_line_height) - 1.).ceil().max(0.) as usize;
+        let start_line = ((offset_y + self.window_config.titlebar_height*FONT_SCALE_OFFSET)/(total_line_height) - 1.).ceil().max(0.) as usize;
         // (line_nr)*(total_line_height) - y_offset > winow.height means line starts below bottom of screen
-        let last_line = ((window_size.height as f32 + offset_y)/total_line_height).ceil() as usize;
+        let last_line = ((window_size.height as f32 * FONT_SCALE_OFFSET + offset_y)/total_line_height).ceil() as usize;
 
         // 2. =============================================================
         let (lines_of_graphemes_iter, (start_grapheme_index, end_grapheme_index)) = buffer.nowrap_lines(start_line, last_line);
         let start_line_y_offset = total_line_height*start_line as f32 - offset_y + v_metrics.ascent;
-        let scan_iter = self.graphemes2glyphs(font, scale, lines_of_graphemes_iter, start_line_y_offset, offset_x, total_line_height);
+        let scan_iter = self.graphemes2glyphs(&self.window_config.font, scale, lines_of_graphemes_iter, start_line_y_offset, offset_x, total_line_height);
         let (glyph_data, mid_glyph_positions): (Vec<_>, Vec<_>) = scan_iter.unzip();
 
         // 3. =============================================================
@@ -503,7 +519,7 @@ impl Display {
 
 
         // titlebar
-        let coords = [[0., 0.], [window_size.width as f32, 0.], [0., titlebar_height], [window_size.width as f32, titlebar_height]];
+        let coords = [[0., 0.], [window_size.width as f32, 0.], [0., self.window_config.titlebar_height], [window_size.width as f32, self.window_config.titlebar_height]];
         let coords = coords.map(|[a, b]| CursorVertex{position: [a/(window_size.width as f32)*2.-1., -b/(window_size.height as f32)*2.+1.]});
         let titlebar_vertex_buffer = VertexBuffer::new(&self.glium_display, &coords)?;
         let titlebar_index_buffer = IndexBuffer::new(&self.glium_display, PrimitiveType::TrianglesList, &[0u32, 1u32, 2u32, 1u32, 2u32, 3u32])?;
@@ -511,11 +527,12 @@ impl Display {
 
         // 5. =============================================================
         let mut target = self.glium_display.draw();
-        target.clear_color_srgb(bg_color.0, bg_color.1, bg_color.2, bg_color.3);
+        let [r, g, b, a] = self.window_config.background_color;
+        target.clear_color_srgb(r, g, b, a);
 
         let glyph_draw_parameters = glium::DrawParameters {
             blend: Blend::alpha_blending(),
-            smooth: Some(glium::draw_parameters::Smooth::Nicest),
+            // smooth: Some(glium::draw_parameters::Smooth::Nicest),
             .. Default::default()
         };
 

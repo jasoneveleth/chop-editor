@@ -8,6 +8,7 @@ use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::WindowEvent;
 use winit::event::{Event, MouseScrollDelta, ElementState};
 use winit::event_loop::EventLoop;
+use winit::window::CursorIcon;
 use winit::window::WindowBuilder;
 use winit::keyboard::{Key, NamedKey};
 use glutin_winit::DisplayBuilder;
@@ -18,9 +19,10 @@ use glutin::display::GetGlDisplay;
 use glutin::prelude::*;
 use glutin::surface::SurfaceAttributesBuilder;
 
-use pager::render::terminal_render;
+// use pager::render::terminal_render;
 use pager::render::GlyphAtlas;
 use pager::render::Display;
+use pager::render::WindowConfig;
 use pager::buffer::TextBuffer;
 
 fn main() {
@@ -34,7 +36,7 @@ fn main() {
 
     let font_data = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
     let font = Font::try_from_bytes(font_data).expect("Error loading font");
-    let font_size = 20.0;
+    let font_size = 17.0;
     let font_color = (0xab, 0xb2, 0xbf);
     // let font_color = (0x00, 0x00, 0x00);
     let font_color = (font_color.0 as f32 / 255.0, font_color.1 as f32 / 255.0, font_color.2 as f32 / 255.0);
@@ -90,8 +92,6 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
     let context = not_current_gl_context.unwrap().make_current(&surface).unwrap();
     let display = glium::Display::new(context, surface).unwrap();
 
-    let display = Display::new(glyph_atlas, display, size);
-
     let titlebar_height = 28.;
     let y_padding = 4.0 + titlebar_height;
     let x_padding = 10.0;
@@ -102,7 +102,11 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
     // let color = ((color.0 as f32 / 255.0).powf(2.2), (color.1 as f32 / 255.0).powf(2.2), (color.2 as f32 / 255.0).powf(2.2));
     let color = ((color.0 as f32 / 255.0), (color.1 as f32 / 255.0), (color.2 as f32 / 255.0));
     let (r, g, b) = color;
-    let background_color = (r, g, b, 1.0);
+    let background_color = [r, g, b, 1.0];
+
+    let window_things = WindowConfig::new(font_size, font, titlebar_height, x_padding, background_color);
+
+    let display = Display::new(glyph_atlas, display, window, window_things);
 
     event_loop.run(move |ev, elwt| {
         match ev {
@@ -110,6 +114,9 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                 WindowEvent::CloseRequested => {
                     log::info!("close requested");
                     elwt.exit();
+                },
+                WindowEvent::Resized(_sized) => {
+                    ()
                 },
                 WindowEvent::MouseWheel{delta, ..} => {
                     match delta {
@@ -122,9 +129,9 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                             scroll_y -= y as f32;
                             // we want to scroll past the top (ie. negative)
                             let scale = rusttype::Scale::uniform(font_size);
-                            let line_height = font.v_metrics(scale).ascent - font.v_metrics(scale).descent + font.v_metrics(scale).line_gap;
+                            let line_height = display.font().v_metrics(scale).ascent - display.font().v_metrics(scale).descent + display.font().v_metrics(scale).line_gap;
                             scroll_y = scroll_y.max(-y_padding).min((buffer.num_lines()-1) as f32 *line_height - titlebar_height);
-                            match display.draw(font_size, &font, scroll_y, titlebar_height, x_padding, &buffer, background_color) {
+                            match display.draw(&buffer, scroll_y, x_padding) {
                                 Err(err) => log::error!("problem drawing: {:?}", err),
                                 _ => ()
                             }
@@ -133,6 +140,13 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                 },
                 WindowEvent::ModifiersChanged(_state) => {
                     ()
+                },
+                WindowEvent::CursorMoved { device_id: _, position } => {
+                    if position.y <= titlebar_height as f64 * 2. {
+                        display.window.set_cursor_icon(CursorIcon::Default);
+                    } else {
+                        display.window.set_cursor_icon(CursorIcon::Text);
+                    }
                 },
                 WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
                     let mut need_redraw = false;
@@ -156,7 +170,7 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                         need_redraw = true;
                     }
                     if need_redraw {
-                        match display.draw(font_size, &font, scroll_y, titlebar_height, x_padding, &buffer, background_color) {
+                        match display.draw(&buffer, scroll_y, x_padding) {
                             Err(err) => log::error!("problem drawing: {:?}", err),
                             _ => ()
                         }
@@ -164,7 +178,7 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                 },
                 WindowEvent::RedrawRequested => {
                     log::info!("redraw requested");
-                    match display.draw(font_size, &font, scroll_y, titlebar_height, x_padding, &buffer, background_color) {
+                    match display.draw(&buffer, scroll_y, x_padding) {
                         Err(err) => log::error!("problem drawing: {:?}", err),
                         _ => ()
                     }
