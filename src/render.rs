@@ -294,7 +294,7 @@ pub struct Display<'a> {
     font_program: Program,
     atlas_texture: Texture2d,
     glyph_info: GlyphInfo,
-    pub window: Window,
+    pub window: &'a Window,
     window_config: WindowConfig<'a>,
 }
 
@@ -326,7 +326,7 @@ impl<T: Add<Output = T>> Add for Point<T> {
 }
 
 impl<'b> Display<'b> {
-    pub fn new(glyph_atlas: GlyphAtlas, display: glium::Display<WindowSurface>, window: Window, window_config: WindowConfig<'b>) -> Self {
+    pub fn new(glyph_atlas: GlyphAtlas, display: glium::Display<WindowSurface>, window: &'b  Window, window_config: WindowConfig<'b>) -> Self {
         terminal_render(glyph_atlas.width, glyph_atlas.height, &glyph_atlas.buffer);
         let raw_image = glium::texture::RawImage2d::from_raw_rgba(glyph_atlas.buffer, (glyph_atlas.width as u32, glyph_atlas.height as u32));
         let texture = Texture2d::new(&display, raw_image).expect("unable to create 2d texture");
@@ -546,5 +546,9 @@ impl<'b> Display<'b> {
         // Finish the frame
         target.finish()?;
         Ok(())
+    }
+
+    pub fn request_redraw(&self) {
+        self.window.request_redraw()
     }
 }

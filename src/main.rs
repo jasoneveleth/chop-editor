@@ -18,12 +18,22 @@ use glutin::context::ContextAttributesBuilder;
 use glutin::display::GetGlDisplay;
 use glutin::prelude::*;
 use glutin::surface::SurfaceAttributesBuilder;
+use std::sync::Arc;
+use arc_swap::{ArcSwap, ArcSwapAny};
+use crossbeam::thread;
+use std::sync::mpsc;
 
 // use pager::render::terminal_render;
 use pager::render::GlyphAtlas;
 use pager::render::Display;
 use pager::render::WindowConfig;
 use pager::buffer::TextBuffer;
+
+pub enum BufferOp {
+    Insert(String),
+    Delete,
+    MoveHorizontal(i64),
+}
 
 fn main() {
     env_logger::init();
@@ -44,15 +54,16 @@ fn main() {
     let atlas = GlyphAtlas::from_font(&font, font_size, font_color);
 
     if let Ok(buffer) = TextBuffer::from_filename(file_path) {
+        let buffer = ArcSwap::from(Arc::new(buffer));
         // terminal_render(atlas.width, atlas.height, &atlas.buffer);
-        run(atlas, font, font_size, buffer);
+        run(atlas, font, font_size, &buffer);
     } else {
         log::error!("file doesn't exist");
         std::process::exit(1);
     }
 }
 
-fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer: TextBuffer) {
+fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
     let size = LogicalSize {width: 800, height: 600};
 
     let wb = WindowBuilder::new()
@@ -103,7 +114,32 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
 
     let window_things = WindowConfig::new(font_size, font, titlebar_height, x_padding, bg_color);
 
-    let display = Display::new(glyph_atlas, display, window, window_things);
+    let display = Display::new(glyph_atlas, display, &window, window_things);
+    let borrowed_window = &window;
+
+    let (buffer_tx, buffer_rx) = mpsc::channel();
+
+    thread::scope(|s| {
+        s.spawn(move |_| {
+        while let Ok(received) = buffer_rx.recv() {
+            // INVARIANT: `buffer_ref` SHOULD ONLY EVER BE MODIFIED BY THIS THREAD
+            match received {
+                BufferOp::Delete => {
+                    let buffer = &*buffer_ref.load();
+                    buffer_ref.store(Arc::new(buffer.delete()));
+                },
+                BufferOp::Insert(s) => {
+                    let buffer = &*buffer_ref.load();
+                    buffer_ref.store(Arc::new(buffer.insert(&s)));
+                },
+                BufferOp::MoveHorizontal(n) => {
+                    let buffer = &*buffer_ref.load();
+                    buffer_ref.store(Arc::new(buffer.move_horizontal(n)));
+                },
+            }
+            borrowed_window.request_redraw();
+        }
+    });
 
     event_loop.run(move |ev, elwt| {
         match ev {
@@ -127,8 +163,9 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                             // we want to scroll past the top (ie. negative)
                             let scale = rusttype::Scale::uniform(font_size);
                             let line_height = display.font().v_metrics(scale).ascent - display.font().v_metrics(scale).descent + display.font().v_metrics(scale).line_gap;
-                            scroll_y = scroll_y.max(-y_padding).min((buffer.num_lines()-1) as f32 *line_height - titlebar_height);
-                            match display.draw(&buffer, scroll_y, x_padding) {
+                            let real_buffer = &*buffer_ref.load();
+                            scroll_y = scroll_y.max(-y_padding).min((real_buffer.num_lines()-1) as f32 *line_height - titlebar_height);
+                            match display.draw(&real_buffer, scroll_y, x_padding) {
                                 Err(err) => log::error!("problem drawing: {:?}", err),
                                 _ => ()
                             }
@@ -150,15 +187,15 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                     if event.state != ElementState::Released {
                         match event.logical_key {
                             Key::Character(s) => {
-                                buffer = buffer.insert(s.as_str());
+                                buffer_tx.send(BufferOp::Insert(String::from(s.as_str()))).unwrap();
                             },
                             Key::Named(n) => {
                                 match n {
-                                    NamedKey::Enter => buffer = buffer.insert("\n"),
-                                    NamedKey::ArrowLeft => buffer = buffer.move_horizontal(-1),
-                                    NamedKey::ArrowRight => buffer = buffer.move_horizontal(1),
-                                    NamedKey::Space => buffer = buffer.insert(" "),
-                                    NamedKey::Backspace => buffer = buffer.delete(),
+                                    NamedKey::Enter => buffer_tx.send(BufferOp::Insert(String::from("\n"))).unwrap(),
+                                    NamedKey::ArrowLeft => buffer_tx.send(BufferOp::MoveHorizontal(-1)).unwrap(),
+                                    NamedKey::ArrowRight => buffer_tx.send(BufferOp::MoveHorizontal(1)).unwrap(),
+                                    NamedKey::Space => buffer_tx.send(BufferOp::Insert(String::from(" "))).unwrap(),
+                                    NamedKey::Backspace => buffer_tx.send(BufferOp::Delete).unwrap(),
                                     a => {dbg!(a);},
                                 }
                             }
@@ -167,7 +204,7 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                         need_redraw = true;
                     }
                     if need_redraw {
-                        match display.draw(&buffer, scroll_y, x_padding) {
+                        match display.draw(&buffer_ref.load(), scroll_y, x_padding) {
                             Err(err) => log::error!("problem drawing: {:?}", err),
                             _ => ()
                         }
@@ -175,7 +212,7 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
                 },
                 WindowEvent::RedrawRequested => {
                     log::info!("redraw requested");
-                    match display.draw(&buffer, scroll_y, x_padding) {
+                    match display.draw(&*buffer_ref.load(), scroll_y, x_padding) {
                         Err(err) => log::error!("problem drawing: {:?}", err),
                         _ => ()
                     }
@@ -184,5 +221,5 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, mut buffer:
             },
             _ => (),
         }
-    }).unwrap();
+    }).unwrap()}).unwrap();
 }

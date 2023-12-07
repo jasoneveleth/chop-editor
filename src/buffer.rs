@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::iter::Iterator;
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::fs::read_to_string;
 use unicode_segmentation::UnicodeSegmentation;
@@ -23,7 +23,7 @@ pub struct Selection {
 }
 
 pub struct FileInfo {
-    pub filename: Rc<PathBuf>,
+    pub filename: Arc<PathBuf>,
     // whether we've modified the buffer since `file_time`
     pub is_modified: bool,
     // last time that the file and buffer were identical 
@@ -34,10 +34,10 @@ pub struct FileInfo {
 pub struct TextBuffer {
     pub file: Option<FileInfo>,
     // !!! this should always be sorted
-    pub cursors: Rc<[Selection]>,
+    pub cursors: Arc<[Selection]>,
     // this is the index
     pub main_cursor: usize,
-    contents: Rc<str>,
+    contents: Arc<str>,
 }
 
 impl Selection {
@@ -52,11 +52,11 @@ impl Selection {
 
 impl TextBuffer {
     pub fn from_filename(filename: &str) -> Result<Self, std::io::Error> {
-        let contents = Rc::from(read_to_string(filename)?);
+        let contents = Arc::from(read_to_string(filename)?);
         let now = std::time::SystemTime::now();
-        let filename = Rc::from(PathBuf::from(filename));
+        let filename = Arc::from(PathBuf::from(filename));
         let fi = FileInfo {filename, is_modified: false, file_time: now};
-        let cursors = Rc::from([Selection{start: 0, offset: 0}]);
+        let cursors = Arc::from([Selection{start: 0, offset: 0}]);
         Ok(Self {file: Some(fi), cursors, main_cursor: 0, contents})
     }
 
@@ -123,7 +123,7 @@ impl TextBuffer {
             None
         };
         let cursors: Vec<_> = self.cursors.iter().map(|s| Selection{start: ((s.start as i64 + offset).max(0) as usize).min(self.num_graphemes()-1), offset: 0 as i64}).collect();
-        let cursors = Rc::from(cursors);
+        let cursors = Arc::from(cursors);
         let contents = self.contents.clone();
 
         Self {file, cursors, main_cursor: self.main_cursor, contents}
@@ -146,7 +146,7 @@ impl TextBuffer {
             |(_, s): (usize, &Selection)| Selection{start: s.end(), offset: 0 as i64}
         };
         let cursors: Vec<Selection> = self.cursors.iter().enumerate().map(update).collect();
-        let cursors = Rc::from(cursors);
+        let cursors = Arc::from(cursors);
 
         let mut contents = String::new();
         let mut prev = 0;
@@ -156,7 +156,7 @@ impl TextBuffer {
             prev = selection.start;
         }
         contents += &self.contents[prev..];
-        let contents = Rc::from(contents);
+        let contents = Arc::from(contents);
 
         Self {file, cursors, main_cursor: self.main_cursor, contents}
     }
@@ -176,7 +176,7 @@ impl TextBuffer {
             None
         };
         let cursors: Vec<Selection> = self.cursors.iter().enumerate().map(|(i, s)| Selection{start: s.start + (i+1) * text.len(), offset: text.len() as i64}).collect();
-        let cursors = Rc::from(cursors);
+        let cursors = Arc::from(cursors);
 
         let mut contents = String::new();
         let mut prev = 0;
@@ -186,7 +186,7 @@ impl TextBuffer {
             prev = selection.start;
         }
         contents += &self.contents[prev..];
-        let contents = Rc::from(contents);
+        let contents = Arc::from(contents);
 
         Self {file, cursors, main_cursor: self.main_cursor, contents}
     }
@@ -202,8 +202,8 @@ mod tests {
     fn create_buffer(s: &str, cursors: Vec<Selection>) -> TextBuffer {
         TextBuffer {
             file: None, 
-            cursors: Rc::from(cursors), 
-            contents: Rc::from(s), 
+            cursors: Arc::from(cursors), 
+            contents: Arc::from(s), 
             main_cursor: 0
         }
     }
