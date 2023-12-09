@@ -183,7 +183,6 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, buffer_ref:
                     }
                 },
                 WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
-                    let mut need_redraw = false;
                     if event.state != ElementState::Released {
                         match event.logical_key {
                             Key::Character(s) => {
@@ -200,13 +199,6 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, buffer_ref:
                                 }
                             }
                             a => {dbg!(a);},
-                        }
-                        need_redraw = true;
-                    }
-                    if need_redraw {
-                        match display.draw(&buffer_ref.load(), scroll_y, x_padding) {
-                            Err(err) => log::error!("problem drawing: {:?}", err),
-                            _ => ()
                         }
                     }
                 },

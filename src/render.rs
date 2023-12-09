@@ -378,32 +378,34 @@ impl<'b> Display<'b> {
         text.scan((None, 0.0), Box::new(move |(prev, x): &mut (Option<GlyphId>, f32), g: &str| {
             // EMOJI: this may have more than 1 byte in it
             let ch = g.chars().nth(0).unwrap();
-            let glyph: Glyph = font.glyphs_for(g.chars()).to_owned().nth(0).unwrap();
-            let g = glyph.scaled(scale);
-            let mut left_side_of_char = *x;
             if ch == '\n' {
-                line_start = line_start + rusttype::vector(0.0, total_line_height);
+                let left_side_of_char = *x;
                 *x = 0.;
+                *prev = None;
+                line_start = line_start + rusttype::vector(0.0, total_line_height);
+                Some((None, (line_start.x + left_side_of_char, line_start.y - total_line_height - ascent)))
             } else {
+                let glyph: Glyph = font.glyphs_for(g.chars()).to_owned().nth(0).unwrap();
+
+                let g = glyph.scaled(scale);
+                let mut left_side_of_char = *x;
                 if let Some(prev) = prev {
-                    let y: f32 = font.pair_kerning(scale, *prev, g.id());
-                    *x += y;
-                    left_side_of_char += y/2.;
+                    let kerning: f32 = font.pair_kerning(scale, *prev, g.id());
+                    *x += kerning;
+                    left_side_of_char += kerning/2.;
                 }
-            }
-            let w = g.h_metrics().advance_width;
-            let next = g.positioned(line_start + rusttype::vector(*x, 0.0));
-            *prev = Some(next.id());
-            if ch != '\n' {
+                let w = g.h_metrics().advance_width;
+                let current_glyph = g.positioned(line_start + rusttype::vector(*x, 0.0));
+                *prev = Some(current_glyph.id());
                 *x += w;
+                let glyph_data = if let (Some(tex_pos), Some(bbox)) = (self.glyph_info.get(&ch), current_glyph.pixel_bounding_box()) {
+                    let bbox = Rect{min: rusttype::Point{x: bbox.min.x as f32, y: bbox.min.y as f32}, max: rusttype::Point{x: bbox.max.x as f32, y: bbox.max.y as f32}};
+                    Some(GlyphData {bbox, tex_pos: *tex_pos})
+                } else {
+                    None
+                };
+                Some((glyph_data, (line_start.x + left_side_of_char, line_start.y - ascent)))
             }
-            let glyph_data = if let (Some(tex_pos), Some(bbox)) = (self.glyph_info.get(&ch), next.pixel_bounding_box()) {
-                let bbox = Rect{min: rusttype::Point{x: bbox.min.x as f32, y: bbox.min.y as f32}, max: rusttype::Point{x: bbox.max.x as f32, y: bbox.max.y as f32}};
-                Some(GlyphData {bbox, tex_pos: *tex_pos})
-            } else {
-                None
-            };
-            Some((glyph_data, (line_start.x + left_side_of_char, line_start.y - ascent)))
         }))
     }
 
