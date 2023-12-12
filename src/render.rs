@@ -388,12 +388,11 @@ impl<'b> Display<'b> {
                 let glyph: Glyph = font.glyphs_for(g.chars()).to_owned().nth(0).unwrap();
 
                 let g = glyph.scaled(scale);
-                let mut left_side_of_char = *x;
                 if let Some(prev) = prev {
                     let kerning: f32 = font.pair_kerning(scale, *prev, g.id());
                     *x += kerning;
-                    left_side_of_char += kerning/2.;
                 }
+                let left_side_of_char = *x;
                 let w = g.h_metrics().advance_width;
                 let current_glyph = g.positioned(line_start + rusttype::vector(*x, 0.0));
                 *prev = Some(current_glyph.id());
