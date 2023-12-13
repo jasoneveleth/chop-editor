@@ -1,4 +1,4 @@
-# crop 🪓
+# chop 🪓
 
 My new text editor.
 
