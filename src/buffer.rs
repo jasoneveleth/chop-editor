@@ -51,10 +51,15 @@ impl Selection {
 }
 
 impl TextBuffer {
-    pub fn from_filename(filename: &str) -> Result<Self, std::io::Error> {
-        let contents = Arc::from(read_to_string(filename)?);
+    pub fn from_filename(filename_str: &str) -> Result<Self, std::io::Error> {
+        let filename: Arc<PathBuf> = Arc::from(PathBuf::from(filename_str));
+        let size = filename.as_path().metadata().unwrap().len();
+        let three_gb = 3*1024*1024*1024;
+        if size >= three_gb {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "File was larger than 7GB"));
+        }
+        let contents = Arc::from(read_to_string(filename_str)?);
         let now = std::time::SystemTime::now();
-        let filename = Arc::from(PathBuf::from(filename));
         let fi = FileInfo {filename, is_modified: false, file_time: now};
         let cursors = Arc::from([Selection{start: 0, offset: 0}]);
         Ok(Self {file: Some(fi), cursors, main_cursor: 0, contents})
@@ -299,6 +304,15 @@ mod tests {
             let c: Vec<char> = a.chars().collect();
             assert!(c.len() == 1);
             assert_eq!(c[0], b);
+        }
+    }
+
+    #[test]
+    fn test_file_too_large() {
+        let filename = "/Users/jason/Documents/media/videos/iMovie videos/Jurasic Park - Dear Donohue.mov";
+        match TextBuffer::from_filename(filename) {
+            Ok(_) => assert!(false),
+            Err(e) => assert_eq!(e.to_string().as_str(), "File was larger than 7GB"),
         }
     }
 }

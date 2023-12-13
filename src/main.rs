@@ -23,11 +23,10 @@ use arc_swap::{ArcSwap, ArcSwapAny};
 use crossbeam::thread;
 use std::sync::mpsc;
 
-// use pager::render::terminal_render;
-use pager::render::GlyphAtlas;
-use pager::render::Display;
-use pager::render::WindowConfig;
-use pager::buffer::TextBuffer;
+use chop::render::GlyphAtlas;
+use chop::render::Display;
+use chop::render::WindowConfig;
+use chop::buffer::TextBuffer;
 
 pub enum BufferOp {
     Insert(String),
