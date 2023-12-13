@@ -59,14 +59,21 @@ impl TextBuffer {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "File was larger than 7GB"));
         }
         let contents = Arc::from(read_to_string(filename_str)?);
-        let now = std::time::SystemTime::now();
-        let fi = FileInfo {filename, is_modified: false, file_time: now};
+        let fi = FileInfo {filename, is_modified: false, file_time: SystemTime::now()};
         let cursors = Arc::from([Selection{start: 0, offset: 0}]);
         Ok(Self {file: Some(fi), cursors, main_cursor: 0, contents})
     }
 
-    pub fn write(&self, filename: &Path) -> Result<(), std::io::Error> {
-        std::fs::write(filename, &*self.contents)
+    pub fn write(&self, filename: &Path) -> Result<Self, std::io::Error> {
+        std::fs::write(filename, &*self.contents)?;
+        let fi = Some(FileInfo {
+                filename: Arc::from(filename),
+                is_modified: false,
+                file_time: SystemTime::now(),
+        });
+        let cursors = self.cursors.clone();
+        let contents = self.contents.clone();
+        Ok(Self {file: fi, cursors, main_cursor: self.main_cursor, contents})
     }
 
     pub fn num_lines(&self) -> usize {
@@ -125,7 +132,7 @@ impl TextBuffer {
         let file = if let Some(fileinfo) = &self.file {
             Some(FileInfo {
                 filename: fileinfo.filename.clone(),
-                is_modified: true,
+                is_modified: fileinfo.is_modified,
                 file_time: fileinfo.file_time,
             })
         } else {

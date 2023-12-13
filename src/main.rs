@@ -145,7 +145,10 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, buffer_ref:
                     BufferOp::Save => {
                         let buffer = &*buffer_ref.load();
                         let filepath = &buffer.file.as_ref().unwrap().filename;
-                        buffer.write(filepath).unwrap_or_else(|e| log::error!("{}", e));
+                        match buffer.write(filepath) {
+                            Err(e) => log::error!("tried to save buffer, but {}", e),
+                            Ok(b) => buffer_ref.store(Arc::new(b)),
+                        }
                     }
                 }
                 borrowed_window.request_redraw();
