@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::iter::Iterator;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -23,7 +23,7 @@ pub struct Selection {
 }
 
 pub struct FileInfo {
-    pub filename: Arc<PathBuf>,
+    pub filename: Arc<Path>,
     // whether we've modified the buffer since `file_time`
     pub is_modified: bool,
     // last time that the file and buffer were identical 
@@ -52,8 +52,8 @@ impl Selection {
 
 impl TextBuffer {
     pub fn from_filename(filename_str: &str) -> Result<Self, std::io::Error> {
-        let filename: Arc<PathBuf> = Arc::from(PathBuf::from(filename_str));
-        let size = filename.as_path().metadata().unwrap().len();
+        let filename: Arc<Path> = Arc::from(Path::new(filename_str));
+        let size = filename.metadata().unwrap().len();
         let three_gb = 3*1024*1024*1024;
         if size >= three_gb {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "File was larger than 7GB"));
@@ -63,6 +63,10 @@ impl TextBuffer {
         let fi = FileInfo {filename, is_modified: false, file_time: now};
         let cursors = Arc::from([Selection{start: 0, offset: 0}]);
         Ok(Self {file: Some(fi), cursors, main_cursor: 0, contents})
+    }
+
+    pub fn write(&self, filename: &Path) -> Result<(), std::io::Error> {
+        std::fs::write(filename, &*self.contents)
     }
 
     pub fn num_lines(&self) -> usize {

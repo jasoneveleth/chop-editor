@@ -5,12 +5,12 @@ use glutin::config::ConfigTemplateBuilder;
 use raw_window_handle::HasRawWindowHandle;
 use rusttype::Font; 
 use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::WindowEvent;
+use winit::event::{WindowEvent, Modifiers};
 use winit::event::{Event, MouseScrollDelta, ElementState};
 use winit::event_loop::EventLoop;
 use winit::window::CursorIcon;
 use winit::window::WindowBuilder;
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, NamedKey, ModifiersKeyState};
 use glutin_winit::DisplayBuilder;
 use winit::platform::macos::WindowBuilderExtMacOS;
 use glutin::surface::WindowSurface;
@@ -31,6 +31,7 @@ use chop::buffer::TextBuffer;
 pub enum BufferOp {
     Insert(String),
     Delete,
+    Save,
     MoveHorizontal(i64),
 }
 
@@ -60,6 +61,10 @@ fn main() {
         log::error!("file doesn't exist");
         std::process::exit(1);
     }
+}
+
+fn super_pressed(m: &Modifiers) -> bool {
+    m.lsuper_state() == ModifiersKeyState::Pressed || m.rsuper_state() == ModifiersKeyState::Pressed
 }
 
 fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
@@ -120,99 +125,115 @@ fn run(glyph_atlas: GlyphAtlas, font: Font<'static>, font_size: f32, buffer_ref:
 
     thread::scope(|s| {
         s.spawn(move |_| {
-        while let Ok(received) = buffer_rx.recv() {
-            // INVARIANT: `buffer_ref` SHOULD ONLY EVER BE MODIFIED BY THIS THREAD
-            // If this is not upheld, then we have a race condition where the buffer changes
-            // between the load, computation, and store, and we miss something
-            match received {
-                BufferOp::Delete => {
-                    let buffer = &*buffer_ref.load();
-                    buffer_ref.store(Arc::new(buffer.delete()));
-                },
-                BufferOp::Insert(s) => {
-                    let buffer = &*buffer_ref.load();
-                    buffer_ref.store(Arc::new(buffer.insert(&s)));
-                },
-                BufferOp::MoveHorizontal(n) => {
-                    let buffer = &*buffer_ref.load();
-                    buffer_ref.store(Arc::new(buffer.move_horizontal(n)));
-                },
+            while let Ok(received) = buffer_rx.recv() {
+                // INVARIANT: `buffer_ref` SHOULD ONLY EVER BE MODIFIED BY THIS THREAD
+                // If this is not upheld, then we have a race condition where the buffer changes
+                // between the load, computation, and store, and we miss something
+                match received {
+                    BufferOp::Delete => {
+                        let buffer = &*buffer_ref.load();
+                        buffer_ref.store(Arc::new(buffer.delete()));
+                    },
+                    BufferOp::Insert(s) => {
+                        let buffer = &*buffer_ref.load();
+                        buffer_ref.store(Arc::new(buffer.insert(&s)));
+                    },
+                    BufferOp::MoveHorizontal(n) => {
+                        let buffer = &*buffer_ref.load();
+                        buffer_ref.store(Arc::new(buffer.move_horizontal(n)));
+                    },
+                    BufferOp::Save => {
+                        let buffer = &*buffer_ref.load();
+                        let filepath = &buffer.file.as_ref().unwrap().filename;
+                        buffer.write(filepath).unwrap_or_else(|e| log::error!("{}", e));
+                    }
+                }
+                borrowed_window.request_redraw();
             }
-            borrowed_window.request_redraw();
-        }
-    });
+        });
 
-    event_loop.run(move |ev, elwt| {
-        match ev {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => {
-                    log::info!("close requested");
-                    elwt.exit();
-                },
-                WindowEvent::Resized(_sized) => {
-                    ()
-                },
-                WindowEvent::MouseWheel{delta, ..} => {
-                    match delta {
-                        MouseScrollDelta::LineDelta(_, y) => {
-                            // Adjust the scroll position based on the scroll delta
-                            scroll_y -= y * 20.0; // Adjust the scroll speed as needed
-                            log::warn!("we don't expect a linedelta from mouse scroll on macOS, ignoring");
-                        },
-                        MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
-                            scroll_y -= y as f32;
-                            // we want to scroll past the top (ie. negative)
-                            let scale = rusttype::Scale::uniform(font_size);
-                            let line_height = display.font().v_metrics(scale).ascent - display.font().v_metrics(scale).descent + display.font().v_metrics(scale).line_gap;
-                            let real_buffer = &*buffer_ref.load();
-                            scroll_y = scroll_y.max(-y_padding).min((real_buffer.num_lines()-1) as f32 *line_height - titlebar_height);
-                            match display.draw(&real_buffer, scroll_y, x_padding) {
-                                Err(err) => log::error!("problem drawing: {:?}", err),
-                                _ => ()
-                            }
-                        },
-                    }
-                },
-                WindowEvent::ModifiersChanged(_state) => {
-                    ()
-                },
-                WindowEvent::CursorMoved { device_id: _, position } => {
-                    if position.y <= titlebar_height as f64 * 2. {
-                        display.window.set_cursor_icon(CursorIcon::Default);
-                    } else {
-                        display.window.set_cursor_icon(CursorIcon::Text);
-                    }
-                },
-                WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
-                    if event.state != ElementState::Released {
-                        match event.logical_key {
-                            Key::Character(s) => {
-                                buffer_tx.send(BufferOp::Insert(String::from(s.as_str()))).unwrap();
+        let mut mods = Modifiers::default();
+
+        event_loop.run(move |ev, elwt| {
+            match ev {
+                Event::WindowEvent { event, .. } => match event {
+                    WindowEvent::CloseRequested => {
+                        log::info!("close requested");
+                        elwt.exit();
+                    },
+                    WindowEvent::Resized(_sized) => {
+                        ()
+                    },
+                    WindowEvent::MouseWheel{delta, ..} => {
+                        match delta {
+                            MouseScrollDelta::LineDelta(_, y) => {
+                                // Adjust the scroll position based on the scroll delta
+                                scroll_y -= y * 20.0; // Adjust the scroll speed as needed
+                                log::warn!("we don't expect a linedelta from mouse scroll on macOS, ignoring");
                             },
-                            Key::Named(n) => {
-                                match n {
-                                    NamedKey::Enter => buffer_tx.send(BufferOp::Insert(String::from("\n"))).unwrap(),
-                                    NamedKey::ArrowLeft => buffer_tx.send(BufferOp::MoveHorizontal(-1)).unwrap(),
-                                    NamedKey::ArrowRight => buffer_tx.send(BufferOp::MoveHorizontal(1)).unwrap(),
-                                    NamedKey::Space => buffer_tx.send(BufferOp::Insert(String::from(" "))).unwrap(),
-                                    NamedKey::Backspace => buffer_tx.send(BufferOp::Delete).unwrap(),
-                                    a => {dbg!(a);},
+                            MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
+                                scroll_y -= y as f32;
+                                // we want to scroll past the top (ie. negative)
+                                let scale = rusttype::Scale::uniform(font_size);
+                                let line_height = display.font().v_metrics(scale).ascent - display.font().v_metrics(scale).descent + display.font().v_metrics(scale).line_gap;
+                                let real_buffer = &*buffer_ref.load();
+                                scroll_y = scroll_y.max(-y_padding).min((real_buffer.num_lines()-1) as f32 *line_height - titlebar_height);
+                                match display.draw(&real_buffer, scroll_y, x_padding) {
+                                    Err(err) => log::error!("problem drawing: {:?}", err),
+                                    _ => ()
                                 }
-                            }
-                            a => {dbg!(a);},
+                            },
                         }
-                    }
-                },
-                WindowEvent::RedrawRequested => {
-                    log::info!("redraw requested");
-                    match display.draw(&*buffer_ref.load(), scroll_y, x_padding) {
-                        Err(err) => log::error!("problem drawing: {:?}", err),
-                        _ => ()
-                    }
+                    },
+                    WindowEvent::ModifiersChanged(state) => {
+                        mods = state
+                    },
+                    WindowEvent::CursorMoved { device_id: _, position } => {
+                        if position.y <= titlebar_height as f64 * 2. {
+                            display.window.set_cursor_icon(CursorIcon::Default);
+                        } else {
+                            display.window.set_cursor_icon(CursorIcon::Text);
+                        }
+                    },
+                    WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
+                        if event.state != ElementState::Released {
+                            match event.logical_key {
+                                Key::Character(s) => {
+                                    // EMOJI
+                                    let char = s.chars().nth(0).unwrap();
+                                    if char == 'w' && super_pressed(&mods) {
+                                        elwt.exit();
+                                    } else if char == 's' && super_pressed(&mods) {
+                                        buffer_tx.send(BufferOp::Save).unwrap();
+                                    } else {
+                                        buffer_tx.send(BufferOp::Insert(String::from(s.as_str()))).unwrap();
+                                    }
+                                },
+                                Key::Named(n) => {
+                                    match n {
+                                        NamedKey::Enter => buffer_tx.send(BufferOp::Insert(String::from("\n"))).unwrap(),
+                                        NamedKey::ArrowLeft => buffer_tx.send(BufferOp::MoveHorizontal(-1)).unwrap(),
+                                        NamedKey::ArrowRight => buffer_tx.send(BufferOp::MoveHorizontal(1)).unwrap(),
+                                        NamedKey::Space => buffer_tx.send(BufferOp::Insert(String::from(" "))).unwrap(),
+                                        NamedKey::Backspace => buffer_tx.send(BufferOp::Delete).unwrap(),
+                                        _ => (),
+                                    }
+                                }
+                                a => {dbg!(a);},
+                            }
+                        }
+                    },
+                    WindowEvent::RedrawRequested => {
+                        log::info!("redraw requested");
+                        match display.draw(&*buffer_ref.load(), scroll_y, x_padding) {
+                            Err(err) => log::error!("problem drawing: {:?}", err),
+                            _ => ()
+                        }
+                    },
+                    _ => (),
                 },
                 _ => (),
-            },
-            _ => (),
-        }
-    }).unwrap()}).unwrap();
+            }
+        }).unwrap();
+    }).unwrap();
 }
