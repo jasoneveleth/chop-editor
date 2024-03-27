@@ -58,18 +58,19 @@ struct Style {
 
 struct FontRender {
     font: peniko::Font,
+    fallback_font: peniko::Font,
     style: Style,
 }
 
 
 const FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
 // const FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/NotoColorEmoji-Regular.ttf");
-// const FONT_DATA: &[u8] = include_bytes!( "/System/Library/Fonts/Apple Color Emoji.ttc");
+const FALLBACK_FONT_DATA: &[u8] = include_bytes!( "/System/Library/Fonts/Apple Color Emoji.ttc");
 const TITLEBAR_HEIGHT: f32 = 56.;
 const Y_PADDING: f32 = 0.0;
 const X_PADDING: f32 = 20.0;
 const CURSOR_WIDTH: f64 = 4.;
-const CURSOR_HEIGHT: f64 = 30.;
+const CURSOR_HEIGHT: f64 = 35.;
 
 impl FontRender {
     fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> HashMap<usize, (f32, f32)> {
@@ -94,21 +95,19 @@ impl FontRender {
         let mut pos_cache = HashMap::with_capacity(ngraphemes);
 
         let mut pen_x = 0f32;
-        let mut pen_y = 0f32;
+        let mut pen_y = self.style.ascent;
         scene
             .draw_glyphs(&self.font)
             .font_size(self.style.font_size)
             .brush(&peniko::Brush::Solid(self.style.fg_color))
-            .transform(Affine::translate((self.style.voffset_x as f64, (start_line*line_height - y_scroll + self.style.voffset_y + self.style.ascent) as f64)))
+            .transform(Affine::translate((self.style.voffset_x as f64, (start_line*line_height - y_scroll + self.style.voffset_y) as f64)))
             .glyph_transform(None)
             .draw(
                 NonZero,
                 graphemes.filter_map(|c| {
-                    let n = c.bytes().len();
                     let c = c.to_string().chars().nth(0).unwrap();
-                    if n != c.to_string().bytes().len() {
-                        log::warn!("diff length");
-                    }
+                    pos_cache.insert(char_ind, (pen_x, pen_y));
+                    char_ind += 1;
                     if c == '\n' {
                         pen_y += line_height;
                         pen_x = 0.;
@@ -119,8 +118,6 @@ impl FontRender {
                     } else {
                         let x = pen_x;
                         let y = pen_y;
-                        pos_cache.insert(char_ind, (x, y));
-                        char_ind += 1;
                         let gid = charmap.map(c).unwrap_or_default();
                         pen_x += glyph_metrics.advance_width(gid).unwrap_or_default();
                         Some(vello::glyph::Glyph {
@@ -141,6 +138,7 @@ struct Args {
     bg_color: peniko::Color, 
     fg_color: peniko::Color,
     font_data: &'static [u8],
+    fallback_font_data: &'static [u8],
 }
 
 
@@ -156,7 +154,7 @@ fn main() {
     let font_size = 28.0;
     let bg_color = peniko::Color::rgb8(0xFA, 0xFA, 0xFA);
     let fg_color = peniko::Color::rgb8(0x0, 0x0, 0x0);
-    let args = Args {font_size, bg_color, fg_color, font_data: FONT_DATA};
+    let args = Args {font_size, bg_color, fg_color, font_data: FONT_DATA, fallback_font_data: FALLBACK_FONT_DATA};
 
     if let Ok(buffer) = TextBuffer::from_filename(file_path) {
         let buffer = ArcSwap::from(Arc::new(buffer));
@@ -198,6 +196,7 @@ fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
         .with_title_hidden(true);
 
     let font = peniko::Font::new(peniko::Blob::new(Arc::new(args.font_data)), 0);
+    let fallback_font = peniko::Font::new(peniko::Blob::new(Arc::new(args.fallback_font_data)), 0);
     let mut scroll_y = 0.; // we want to scroll beyond the top (ie. negative)
     let (line_height, ascent) = get_font_metrics(&font, args.font_size);
 
@@ -205,7 +204,7 @@ fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
     let window = Arc::new(wb.build(&event_loop).unwrap());
     let size = window.inner_size();
 
-    let surface = render_cx.create_surface(window.clone(), size.width, size.height).block_on().unwrap();
+    let surface = render_cx.create_surface(window.clone(), size.width, size.height, Default::default()).block_on().unwrap();
     let mut state = State { surface, window: window.clone() };
     let device = &render_cx.devices[0].device;
 
@@ -240,6 +239,7 @@ fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
         ascent,
     };
     let font_render = FontRender {
+        fallback_font,
         font,
         style,
     };
@@ -358,7 +358,7 @@ fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
                         if let Some(pos) = glyph_pos_cache.get(&c.start) {
                             let (x, y) = *pos;
                             // draw cursor
-                            let pos = ((x + font_render.style.voffset_x) as f64 - CURSOR_WIDTH/2., (y + font_render.style.voffset_y) as f64);
+                            let pos = ((x + font_render.style.voffset_x) as f64 - CURSOR_WIDTH/2., (y + font_render.style.voffset_y - font_render.style.ascent) as f64);
                             scene.fill(NonZero, Affine::translate(pos), font_render.style.cursor_color, None, &cursor_shape);
                             if !c.is_empty() {
                                 if let Some(pos) = glyph_pos_cache.get(&c.end()) {

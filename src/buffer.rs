@@ -170,13 +170,17 @@ impl TextBuffer {
         let cursors = Arc::from(cursors);
 
         let mut contents = String::new();
-        let mut prev = 0;
-        for selection in self.cursors.iter() {
-            // adding 1 in zero case fixes it
-            contents += &self.contents[prev..selection.start + (selection.start==0) as usize -1];
-            prev = selection.start;
+        let mut cursor_ind = 0;
+        for (i, g) in self.contents.graphemes(true).enumerate() {
+            if cursor_ind < self.cursors.len() {
+                let start = self.cursors[cursor_ind].start;
+                if start != 0 && i == start-1 {
+                    cursor_ind += 1;
+                    continue;
+                }
+            }
+            contents += g;
         }
-        contents += &self.contents[prev..];
         let contents = Arc::from(contents);
 
         Self {file, cursors, main_cursor: self.main_cursor, contents}
@@ -200,13 +204,14 @@ impl TextBuffer {
         let cursors = Arc::from(cursors);
 
         let mut contents = String::new();
-        let mut prev = 0;
-        for selection in self.cursors.iter() {
-            contents += &self.contents[prev..selection.start];
-            contents += text;
-            prev = selection.start;
+        let mut cursor_ind = 0;
+        for (i, g) in self.contents.graphemes(true).enumerate() {
+            if cursor_ind < self.cursors.len() && i == self.cursors[cursor_ind].start {
+                contents += text;
+                cursor_ind += 1;
+            }
+            contents += g;
         }
-        contents += &self.contents[prev..];
         let contents = Arc::from(contents);
 
         Self {file, cursors, main_cursor: self.main_cursor, contents}
