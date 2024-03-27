@@ -196,7 +196,7 @@ impl TextBuffer {
         } else {
             None
         };
-        let cursors: Vec<Selection> = self.cursors.iter().enumerate().map(|(i, s)| Selection{start: s.start + (i+1) * text.len(), offset: text.len() as i64}).collect();
+        let cursors: Vec<Selection> = self.cursors.iter().map(|s| Selection{start: s.start + text.len(), offset: 0}).collect();
         let cursors = Arc::from(cursors);
 
         let mut contents = String::new();
