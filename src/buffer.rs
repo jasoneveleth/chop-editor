@@ -53,10 +53,10 @@ impl Selection {
 impl TextBuffer {
     pub fn from_filename(filename_str: &str) -> Result<Self, std::io::Error> {
         let filename: Arc<Path> = Arc::from(Path::new(filename_str));
-        let size = filename.metadata().unwrap().len();
+        let size = filename.metadata()?.len();
         let three_gb = 3*1024*1024*1024;
         if size >= three_gb {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "File was larger than 7GB"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "File was larger than 3GB"));
         }
         let contents = Arc::from(read_to_string(filename_str)?);
         let fi = FileInfo {filename, is_modified: false, file_time: SystemTime::now()};
@@ -85,29 +85,30 @@ impl TextBuffer {
         UnicodeSegmentation::graphemes(s, true).count()
     }
 
+    // 0 indexed
     // end is not included
-    pub fn nowrap_lines(&self, start: usize, end: usize) -> (Graphemes, (usize, usize)) {
+    pub fn nowrap_lines(&self, start: usize, end: usize) -> Graphemes {
         let s: &str = &self.contents;
         let graphemes = UnicodeSegmentation::graphemes(s, true);
-        let mut grapheme_index = -1;
+        // let mut grapheme_index = -1;
         let mut num_lines = 0;
         let mut byte_len = 0;
         for g in graphemes {
             if num_lines == start {
                 break;
             } else {
-                grapheme_index += 1; // get i onto the index of g in graphemes
+                // grapheme_index += 1; // get i onto the index of g in graphemes
                 byte_len += g.len();
                 if g == "\n" {
                     num_lines += 1;
                 }
             }
         }
-        grapheme_index += 1; // go onto the character after the newline
+        // grapheme_index += 1; // go onto the character after the newline
 
         // now `grapheme_index` is at the first grapheme of the start line
         // byte_len is the number of bytes up to that character
-        // num_lines = start
+        // and num_lines = start
 
         let mut byte_len2 = 0;
         for byte in &self.contents.as_bytes()[byte_len..] {
@@ -124,8 +125,9 @@ impl TextBuffer {
         // proof of safety: we are guarenteed that from newline to newline is valid utf8, if we
         // started with valid utf8
         let string = unsafe { std::str::from_utf8_unchecked(byte_array) };
-        let diff = UnicodeSegmentation::graphemes(string, true).count();
-        (UnicodeSegmentation::graphemes(string, true), (grapheme_index as usize, grapheme_index as usize + diff))
+        // let diff = UnicodeSegmentation::graphemes(string, true).count();
+        // uncomment all code, some requeted (UnicodeSegmentation::graphemes(string, true), (grapheme_index as usize, grapheme_index as usize + diff))
+        UnicodeSegmentation::graphemes(string, true)
     }
 
     pub fn move_horizontal(&self, offset: i64) -> Self {
