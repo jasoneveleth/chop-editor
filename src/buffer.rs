@@ -46,7 +46,11 @@ impl Selection {
     }
 
     pub fn end(&self) -> usize {
-        return ((self.start as i64) - self.offset) as usize
+        return ((self.start as i64) + self.offset) as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.offset == 0
     }
 }
 
@@ -85,26 +89,26 @@ impl TextBuffer {
         UnicodeSegmentation::graphemes(s, true).count()
     }
 
-    // 0 indexed
+    // lines are 0 indexed
     // end is not included
-    pub fn nowrap_lines(&self, start: usize, end: usize) -> Graphemes {
+    pub fn nowrap_lines(&self, start: usize, end: usize) -> (Graphemes, (usize, usize)) {
         let s: &str = &self.contents;
         let graphemes = UnicodeSegmentation::graphemes(s, true);
-        // let mut grapheme_index = -1;
+        let mut grapheme_index = -1;
         let mut num_lines = 0;
         let mut byte_len = 0;
         for g in graphemes {
             if num_lines == start {
                 break;
             } else {
-                // grapheme_index += 1; // get i onto the index of g in graphemes
+                grapheme_index += 1; // get i onto the index of g in graphemes
                 byte_len += g.len();
                 if g == "\n" {
                     num_lines += 1;
                 }
             }
         }
-        // grapheme_index += 1; // go onto the character after the newline
+        grapheme_index += 1; // go onto the character after the newline
 
         // now `grapheme_index` is at the first grapheme of the start line
         // byte_len is the number of bytes up to that character
@@ -125,9 +129,8 @@ impl TextBuffer {
         // proof of safety: we are guarenteed that from newline to newline is valid utf8, if we
         // started with valid utf8
         let string = unsafe { std::str::from_utf8_unchecked(byte_array) };
-        // let diff = UnicodeSegmentation::graphemes(string, true).count();
-        // uncomment all code, some requeted (UnicodeSegmentation::graphemes(string, true), (grapheme_index as usize, grapheme_index as usize + diff))
-        UnicodeSegmentation::graphemes(string, true)
+        let diff = UnicodeSegmentation::graphemes(string, true).count();
+        (UnicodeSegmentation::graphemes(string, true), (grapheme_index as usize, diff))
     }
 
     pub fn move_horizontal(&self, offset: i64) -> Self {

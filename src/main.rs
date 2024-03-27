@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use std::env;
 
+use vello::peniko::Fill::NonZero;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{WindowEvent, Modifiers};
 use winit::event::{Event, MouseScrollDelta, ElementState};
@@ -42,6 +44,8 @@ struct State<'s> {
 struct Style {
     bg_color: peniko::Color,
     fg_color: peniko::Color,
+    cursor_color: peniko::Color,
+    selection_color: peniko::Color,
     font_size: f32,
     // vwidth: f32, // viewport width + height
     vheight: f32,
@@ -57,14 +61,18 @@ struct FontRender {
     style: Style,
 }
 
-// "/System/Library/Fonts/Apple Color Emoji.ttc"
+
 const FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
+// const FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/NotoColorEmoji-Regular.ttf");
+// const FONT_DATA: &[u8] = include_bytes!( "/System/Library/Fonts/Apple Color Emoji.ttc");
 const TITLEBAR_HEIGHT: f32 = 56.;
 const Y_PADDING: f32 = 0.0;
 const X_PADDING: f32 = 20.0;
+const CURSOR_WIDTH: f64 = 4.;
+const CURSOR_HEIGHT: f64 = 30.;
 
 impl FontRender {
-    fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) {
+    fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> HashMap<usize, (f32, f32)> {
         let line_height = self.style.line_height;
         let file_ref = skrifa::raw::FileRef::new(self.font.data.as_ref()).unwrap();
         let font_ref = match file_ref {
@@ -82,7 +90,8 @@ impl FontRender {
         let start_line = (y_scroll/line_height).floor().max(0.);
         // (line_nr)*(total_line_height) - y_offset > winow.height means line starts below bottom of screen
         let last_line = ((self.style.vheight as f32 + y_scroll)/line_height).ceil(); // TODO: max with num lines
-        let graphemes = buffer.nowrap_lines(start_line as usize, last_line as usize);
+        let (graphemes, (mut char_ind, ngraphemes)) = buffer.nowrap_lines(start_line as usize, last_line as usize);
+        let mut pos_cache = HashMap::with_capacity(ngraphemes);
 
         let mut pen_x = 0f32;
         let mut pen_y = 0f32;
@@ -93,28 +102,36 @@ impl FontRender {
             .transform(Affine::translate((self.style.voffset_x as f64, (start_line*line_height - y_scroll + self.style.voffset_y + self.style.ascent) as f64)))
             .glyph_transform(None)
             .draw(
-                peniko::Fill::NonZero,
+                NonZero,
                 graphemes.filter_map(|c| {
+                    let n = c.bytes().len();
                     let c = c.to_string().chars().nth(0).unwrap();
+                    if n != c.to_string().bytes().len() {
+                        log::warn!("diff length");
+                    }
                     if c == '\n' {
                         pen_y += line_height;
                         pen_x = 0.;
-                        return None;
+                        None
                     } else if c == '\t' {
                         pen_x += self.style.tab_width;
-                        return None;
+                        None
+                    } else {
+                        let x = pen_x;
+                        let y = pen_y;
+                        pos_cache.insert(char_ind, (x, y));
+                        char_ind += 1;
+                        let gid = charmap.map(c).unwrap_or_default();
+                        pen_x += glyph_metrics.advance_width(gid).unwrap_or_default();
+                        Some(vello::glyph::Glyph {
+                            id: gid.to_u16() as u32,
+                            x,
+                            y,
+                        })
                     }
-
-                    let x = pen_x;
-                    let gid = charmap.map(c).unwrap_or_default();
-                    pen_x += glyph_metrics.advance_width(gid).unwrap_or_default();
-                    Some(vello::glyph::Glyph {
-                        id: gid.to_u16() as u32,
-                        x,
-                        y: pen_y,
-                    })
                 }),
             );
+        pos_cache
     }
     
 }
@@ -189,12 +206,13 @@ fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
     let size = window.inner_size();
 
     let surface = render_cx.create_surface(window.clone(), size.width, size.height).block_on().unwrap();
-    let mut state = State { surface, window };
+    let mut state = State { surface, window: window.clone() };
     let device = &render_cx.devices[0].device;
 
     let use_cpu = false;
     let mut scene = Scene::new();
-    let rect = Rect::new(0., 0., size.width as f64, TITLEBAR_HEIGHT as f64);
+    let titlebar = Rect::new(0., 0., size.width as f64, TITLEBAR_HEIGHT as f64);
+    let cursor_shape = Rect::new(0., 0., CURSOR_WIDTH, CURSOR_HEIGHT);
     let numthr = NonZeroUsize::new(1);
     let mut renderer = Renderer::new(
         &device,
@@ -211,6 +229,8 @@ fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
         font_size: args.font_size,
         fg_color: args.fg_color,
         bg_color: args.bg_color,
+        cursor_color: peniko::Color::rgb8(0x5e, 0x9c, 0xf5),
+        selection_color: peniko::Color::rgba8(0x5e, 0x9c, 0xf5, 0x66),
         vheight: size.height as f32 - TITLEBAR_HEIGHT - Y_PADDING,
         // vwidth: size.width as f32 - X_PADDING,
         voffset_x: X_PADDING,
@@ -253,9 +273,9 @@ fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
                             Err(e) => log::error!("tried to save buffer, but {}", e),
                             Ok(b) => buffer_ref.store(Arc::new(b)),
                         }
-                    }
+                    },
                 }
-                log::warn!("should request a redraw here");
+                window.request_redraw();
             }
         });
 
@@ -328,15 +348,31 @@ fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
                     }
                 },
                 WindowEvent::RedrawRequested => {
-                    log::info!("redraw requested");
-
                     let width = state.surface.config.width;
                     let height = state.surface.config.height;
                     let frame = state.surface.surface.get_current_texture().unwrap();
                     scene.reset();
-                    font_render.render(&mut scene, scroll_y, &*buffer_ref.load());
+                    let buf = &*buffer_ref.load();
+                    let glyph_pos_cache = font_render.render(&mut scene, scroll_y, buf);
+                    for c in &*buf.cursors {
+                        if let Some(pos) = glyph_pos_cache.get(&c.start) {
+                            let (x, y) = *pos;
+                            // draw cursor
+                            let pos = ((x + font_render.style.voffset_x) as f64 - CURSOR_WIDTH/2., (y + font_render.style.voffset_y) as f64);
+                            scene.fill(NonZero, Affine::translate(pos), font_render.style.cursor_color, None, &cursor_shape);
+                            if !c.is_empty() {
+                                if let Some(pos) = glyph_pos_cache.get(&c.end()) {
+                                    let (end_x, end_y) = *pos;
+                                    let selection = Rect::new(x.min(end_x) as f64, 0., (x - end_x).abs() as f64, font_render.style.line_height as f64);
+                                    assert!(end_y == y);
+                                    let inframe = Affine::translate((font_render.style.voffset_x as f64, font_render.style.voffset_y as f64));
+                                    scene.fill(NonZero, inframe, font_render.style.selection_color, None, &selection);
+                                }
+                            }
+                        }
+                    }
                     // draw titlebar
-                    scene.fill(peniko::Fill::NonZero, Affine::IDENTITY, font_render.style.bg_color, None, &rect);
+                    scene.fill(NonZero, Affine::IDENTITY, font_render.style.bg_color, None, &titlebar);
                     renderer
                         .render_to_surface(
                             &render_cx.devices[0].device,
