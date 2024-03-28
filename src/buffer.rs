@@ -351,9 +351,6 @@ mod tests {
 pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>, request_redraw: impl Fn()) -> impl FnOnce(&crossbeam::thread::Scope<'_>) {
     move |_| {
         while let Ok(received) = buffer_rx.recv() {
-            // INVARIANT: `buffer_ref` SHOULD ONLY EVER BE MODIFIED BY THIS THREAD
-            // If this is not upheld, then we have a race condition where the buffer changes
-            // between the load, computation, and store, and we miss something
             match received {
                 BufferOp::Delete => {
                     let buffer = buffer_ref.load();

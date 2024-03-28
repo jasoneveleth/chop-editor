@@ -266,6 +266,9 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
     let (buffer_tx, buffer_rx) = mpsc::channel();
 
     thread::scope(|s| {
+        // INVARIANT: `buffer_ref` SHOULD ONLY EVER BE MODIFIED (`store`d) BY THIS THREAD
+        // If this is not upheld, then we have a race condition where the buffer changes
+        // between the load, computation, and store, and we miss something
         s.spawn(buffer_op_handler(buffer_rx, buffer_ref.clone(), || window.request_redraw()));
 
         let mut mods = Modifiers::default();
@@ -274,7 +277,6 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
             // maybe should check that window_id of WindowEvent matches the state.window.id()
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => {
-                    log::info!("close requested");
                     elwt.exit();
                 },
                 WindowEvent::Resized(size) => {
