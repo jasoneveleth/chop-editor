@@ -64,8 +64,9 @@ struct FontRender {
 
 
 const FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
-// const FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/NotoColorEmoji-Regular.ttf");
-const FALLBACK_FONT_DATA: &[u8] = include_bytes!( "/System/Library/Fonts/Apple Color Emoji.ttc");
+// const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/NotoColorEmoji-Regular.ttf");
+// const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/System/Library/Fonts/Apple Color Emoji.ttc");
+const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/NotoEmoji-VariableFont_wght.ttf");
 const TITLEBAR_HEIGHT: f32 = 56.;
 const Y_PADDING: f32 = 0.0;
 const X_PADDING: f32 = 20.0;
