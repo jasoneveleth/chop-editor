@@ -75,18 +75,31 @@ const CURSOR_HEIGHT: f64 = 35.;
 
 impl FontRender {
     fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> HashMap<usize, (f32, f32)> {
-        let line_height = self.style.line_height;
+        // main font
         let file_ref = skrifa::raw::FileRef::new(self.font.data.as_ref()).unwrap();
         let font_ref = match file_ref {
             skrifa::raw::FileRef::Font(f) => Some(f),
             skrifa::raw::FileRef::Collection(c) => c.get(self.font.index).ok(),
         }
-            .unwrap();
-
+        .unwrap();
         let charmap = font_ref.charmap();
         let settings: Vec<(&str, f32)> = Vec::new();
         let var_loc = font_ref.axes().location(settings.iter().copied());
         let glyph_metrics = font_ref.glyph_metrics(skrifa::instance::Size::new(self.style.font_size), &var_loc);
+
+        // fallback
+        let file_ref = skrifa::raw::FileRef::new(self.fallback_font.data.as_ref()).unwrap();
+        let font_ref = match file_ref {
+            skrifa::raw::FileRef::Font(f) => Some(f),
+            skrifa::raw::FileRef::Collection(c) => c.get(self.fallback_font.index).ok(),
+        }
+        .unwrap();
+        let fallback_charmap = font_ref.charmap();
+        let settings: Vec<(&str, f32)> = Vec::new();
+        let var_loc = font_ref.axes().location(settings.iter().copied());
+        let fallback_glyph_metrics = font_ref.glyph_metrics(skrifa::instance::Size::new(self.style.font_size), &var_loc);
+
+        let line_height = self.style.line_height;
 
         // y_scroll = start_line * line_height + ~~~~ means next line starts below top of screen
         let start_line = (y_scroll/line_height).floor().max(0.);
@@ -94,6 +107,8 @@ impl FontRender {
         let last_line = ((self.style.vheight as f32 + y_scroll)/line_height).ceil(); // TODO: max with num lines
         let (graphemes, (mut char_ind, ngraphemes)) = buffer.nowrap_lines(start_line as usize, last_line as usize);
         let mut pos_cache = HashMap::with_capacity(ngraphemes);
+
+        let mut missing = vec![];
 
         let mut pen_x = 0f32;
         let mut pen_y = self.style.ascent;
@@ -119,19 +134,51 @@ impl FontRender {
                     } else {
                         let x = pen_x;
                         let y = pen_y;
-                        let gid = charmap.map(c).unwrap_or_default();
-                        pen_x += glyph_metrics.advance_width(gid).unwrap_or_default();
-                        Some(vello::glyph::Glyph {
-                            id: gid.to_u16() as u32,
-                            x,
-                            y,
-                        })
+                        if let Some(gid) = charmap.map(c) {
+                            // if we find it in the normal font
+                            pen_x += glyph_metrics.advance_width(gid).unwrap_or_default();
+                            Some(vello::glyph::Glyph {
+                                id: gid.to_u16() as u32,
+                                x,
+                                y,
+                            })
+                        } else if let Some(gid) = fallback_charmap.map(c) {
+                            // if we find it in the fallback font
+                            missing.push((gid, (x, y)));
+                            pen_x += fallback_glyph_metrics.advance_width(gid).unwrap_or_default();
+                            None
+                        } else {
+                            // if we don't find it, use the placeholder of the normal font.
+                            let gid = skrifa::GlyphId::default();
+                            pen_x += glyph_metrics.advance_width(gid).unwrap_or_default();
+                            Some(vello::glyph::Glyph {
+                                id: gid.to_u16() as u32,
+                                x,
+                                y,
+                            })
+                        }
+                    }
+                }),
+            );
+        // draw glyphs missing from normal font
+        scene
+            .draw_glyphs(&self.fallback_font)
+            .font_size(self.style.font_size)
+            .brush(&peniko::Brush::Solid(self.style.fg_color))
+            .transform(Affine::translate((self.style.voffset_x as f64, (start_line*line_height - y_scroll + self.style.voffset_y) as f64)))
+            .glyph_transform(None)
+            .draw(
+                NonZero,
+                missing.into_iter().map(|(gid, (x, y))| {
+                    vello::glyph::Glyph {
+                        id: gid.to_u16() as u32,
+                        x,
+                        y,
                     }
                 }),
             );
         pos_cache
     }
-    
 }
 
 struct Args {
@@ -239,6 +286,7 @@ fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
         line_height,
         ascent,
     };
+
     let font_render = FontRender {
         fallback_font,
         font,
