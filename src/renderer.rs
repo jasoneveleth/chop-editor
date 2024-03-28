@@ -26,19 +26,14 @@ use crossbeam::thread;
 use std::sync::mpsc;
 
 use crate::buffer::TextBuffer;
+use crate::buffer::BufferOp;
+use crate::buffer::buffer_op_handler;
 
 pub struct Args {
     pub font_size: f32, 
     pub bg_color: peniko::Color, 
     pub fg_color: peniko::Color,
     pub font_data: &'static [u8],
-}
-
-pub enum BufferOp {
-    Insert(String),
-    Delete,
-    Save,
-    MoveHorizontal(i64),
 }
 
 struct State<'s> {
@@ -128,6 +123,9 @@ impl FontRender {
                     let c = c.to_string().chars().nth(0).unwrap();
                     pos_cache.insert(char_ind, (pen_x, pen_y));
                     char_ind += 1;
+
+                    // we skip \n and \t. Otherwise try looking in the 
+                    // font and the fallback font.
                     if c == '\n' {
                         pen_y += line_height;
                         pen_x = 0.;
@@ -203,7 +201,7 @@ fn get_font_metrics(font: &peniko::Font, font_size: f32) -> (f32, f32) {
     (line_height * 2., metrics.ascent)
 }
 
-pub fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
+pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
     let size = LogicalSize {width: 800, height: 600};
     let mut render_cx = RenderContext::new().unwrap();
 
@@ -268,36 +266,7 @@ pub fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
     let (buffer_tx, buffer_rx) = mpsc::channel();
 
     thread::scope(|s| {
-        s.spawn(move |_| {
-            while let Ok(received) = buffer_rx.recv() {
-                // INVARIANT: `buffer_ref` SHOULD ONLY EVER BE MODIFIED BY THIS THREAD
-                // If this is not upheld, then we have a race condition where the buffer changes
-                // between the load, computation, and store, and we miss something
-                match received {
-                    BufferOp::Delete => {
-                        let buffer = &*buffer_ref.load();
-                        buffer_ref.store(Arc::new(buffer.delete()));
-                    },
-                    BufferOp::Insert(s) => {
-                        let buffer = &*buffer_ref.load();
-                        buffer_ref.store(Arc::new(buffer.insert(&s)));
-                    },
-                    BufferOp::MoveHorizontal(n) => {
-                        let buffer = &*buffer_ref.load();
-                        buffer_ref.store(Arc::new(buffer.move_horizontal(n)));
-                    },
-                    BufferOp::Save => {
-                        let buffer = &*buffer_ref.load();
-                        let filepath = &buffer.file.as_ref().unwrap().filename;
-                        match buffer.write(filepath) {
-                            Err(e) => log::error!("tried to save buffer, but {}", e),
-                            Ok(b) => buffer_ref.store(Arc::new(b)),
-                        }
-                    },
-                }
-                window.request_redraw();
-            }
-        });
+        s.spawn(buffer_op_handler(buffer_rx, buffer_ref.clone(), || window.request_redraw()));
 
         let mut mods = Modifiers::default();
 
@@ -321,7 +290,7 @@ pub fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
                         },
                         MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
                             scroll_y -= y as f32;
-                            let real_buffer = &*buffer_ref.load();
+                            let real_buffer = buffer_ref.load();
                             // we want to scroll past the top (ie. negative)
                             let end = (real_buffer.num_lines()-1) as f32 * line_height;
                             scroll_y = scroll_y.max(0.).min(end);
@@ -372,8 +341,8 @@ pub fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
                     let height = state.surface.config.height;
                     let frame = state.surface.surface.get_current_texture().unwrap();
                     scene.reset();
-                    let buf = &*buffer_ref.load();
-                    let glyph_pos_cache = font_render.render(&mut scene, scroll_y, buf);
+                    let buf = buffer_ref.load();
+                    let glyph_pos_cache = font_render.render(&mut scene, scroll_y, &buf);
                     for c in &*buf.cursors {
                         if let Some(pos) = glyph_pos_cache.get(&c.start) {
                             let (x, y) = *pos;
@@ -415,3 +384,4 @@ pub fn run(args: Args, buffer_ref: &ArcSwapAny<Arc<TextBuffer>>) {
         }).unwrap();
     }).unwrap();
 }
+

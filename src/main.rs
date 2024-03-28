@@ -26,9 +26,9 @@ fn main() {
     let args = Args {font_size, bg_color, fg_color, font_data: FONT_DATA};
 
     if let Ok(buffer) = TextBuffer::from_filename(file_path) {
-        let buffer = ArcSwap::from(Arc::new(buffer));
+        let buffer = Arc::new(ArcSwap::from_pointee(buffer));
         // terminal_render(atlas.width, atlas.height, &atlas.buffer);
-        run(args, &buffer);
+        run(args, buffer);
     } else {
         log::error!("file doesn't exist");
         std::process::exit(1);

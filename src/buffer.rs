@@ -6,6 +6,16 @@ use std::fs::read_to_string;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_segmentation::Graphemes;
 
+use arc_swap::ArcSwapAny;
+use std::sync::mpsc;
+
+pub enum BufferOp {
+    Insert(String),
+    Delete,
+    Save,
+    MoveHorizontal(i64),
+}
+
 // let | be the cursor, and \ be the end of the selection
 
 // "|abc\djk" start: 0, offset: 3
@@ -334,6 +344,39 @@ mod tests {
         match TextBuffer::from_filename(filename) {
             Ok(_) => assert!(false),
             Err(e) => assert_eq!(e.to_string().as_str(), "File was larger than 7GB"),
+        }
+    }
+}
+
+pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>, request_redraw: impl Fn()) -> impl FnOnce(&crossbeam::thread::Scope<'_>) {
+    move |_| {
+        while let Ok(received) = buffer_rx.recv() {
+            // INVARIANT: `buffer_ref` SHOULD ONLY EVER BE MODIFIED BY THIS THREAD
+            // If this is not upheld, then we have a race condition where the buffer changes
+            // between the load, computation, and store, and we miss something
+            match received {
+                BufferOp::Delete => {
+                    let buffer = buffer_ref.load();
+                    buffer_ref.store(Arc::new(buffer.delete()));
+                },
+                BufferOp::Insert(s) => {
+                    let buffer = buffer_ref.load();
+                    buffer_ref.store(Arc::new(buffer.insert(&s)));
+                },
+                BufferOp::MoveHorizontal(n) => {
+                    let buffer = buffer_ref.load();
+                    buffer_ref.store(Arc::new(buffer.move_horizontal(n)));
+                },
+                BufferOp::Save => {
+                    let buffer = buffer_ref.load();
+                    let filepath = &buffer.file.as_ref().unwrap().filename;
+                    match buffer.write(filepath) {
+                        Err(e) => log::error!("tried to save buffer, but {}", e),
+                        Ok(b) => buffer_ref.store(Arc::new(b)),
+                    }
+                },
+            }
+            request_redraw();
         }
     }
 }
