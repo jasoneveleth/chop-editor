@@ -378,9 +378,9 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     glyph_pos_cache = font_render.render(&mut scene, scroll_y, &buf);
                     for c in &*buf.cursors {
                         if let Some(pos) = glyph_pos_cache.get(&c.start) {
-                            let ((x, y), (_, _)) = *pos;
+                            let ((_, _), (x, y)) = *pos;
                             // draw cursor
-                            let pos = ((x + font_render.style.voffset_x) as f64 - CURSOR_WIDTH/2., (y + font_render.style.voffset_y - font_render.style.ascent) as f64);
+                            let pos = (x as f64 - CURSOR_WIDTH/2., (y - font_render.style.ascent/2.) as f64 - CURSOR_HEIGHT/2.);
                             scene.fill(NonZero, Affine::translate(pos), font_render.style.cursor_color, None, &cursor_shape);
                             if !c.is_empty() {
                                 if let Some(pos) = glyph_pos_cache.get(&c.end()) {
