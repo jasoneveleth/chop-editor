@@ -14,6 +14,7 @@ pub enum BufferOp {
     Delete,
     Save,
     MoveHorizontal(i64),
+    SetMainCursor(usize),
 }
 
 // let | be the cursor, and \ be the end of the selection
@@ -32,6 +33,7 @@ pub struct Selection {
     offset: i64,
 }
 
+#[derive(Debug, Clone)]
 pub struct FileInfo {
     pub filename: Arc<Path>,
     // whether we've modified the buffer since `file_time`
@@ -195,10 +197,6 @@ impl TextBuffer {
 
         Self {file, cursors, main_cursor: self.main_cursor, contents}
     }
-
-    // pub fn up(&self) -> Self {
-    //     let cursors: Vec<Selection> = self.cursors.iter().
-    // }
 
     pub fn insert(&self, text: &str) -> Self {
         let file = if let Some(fileinfo) = &self.file {
@@ -371,6 +369,18 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<Ar
                         Err(e) => log::error!("tried to save buffer, but {}", e),
                         Ok(b) => buffer_ref.store(Arc::new(b)),
                     }
+                },
+                BufferOp::SetMainCursor(i) => {
+                    let buffer = buffer_ref.load();
+                    let mut cursors = (*buffer.cursors).to_owned();
+                    cursors[buffer.main_cursor].start = i;
+                    cursors[buffer.main_cursor].offset = 0;
+                    buffer_ref.store(Arc::new(TextBuffer {
+                        main_cursor: buffer.main_cursor,
+                        contents: buffer.contents.clone(),
+                        file: buffer.file.clone(),
+                        cursors: Arc::from(cursors.as_slice()),
+                    }));
                 },
             }
             request_redraw();

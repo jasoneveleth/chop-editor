@@ -5,7 +5,7 @@ use std::sync::Arc;
 use vello::peniko::Fill::NonZero;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{WindowEvent, Modifiers};
-use winit::event::{Event, MouseScrollDelta, ElementState};
+use winit::event::{Event, MouseScrollDelta, ElementState, MouseButton};
 use winit::event_loop::EventLoop;
 use winit::window::CursorIcon;
 use winit::window::WindowBuilder;
@@ -73,7 +73,7 @@ const CURSOR_WIDTH: f64 = 4.;
 const CURSOR_HEIGHT: f64 = 35.;
 
 impl FontRender {
-    fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> HashMap<usize, (f32, f32)> {
+    fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> HashMap<usize, ((f32, f32), (f32, f32))> {
         // main font
         let file_ref = skrifa::raw::FileRef::new(self.font.data.as_ref()).unwrap();
         let font_ref = match file_ref {
@@ -105,23 +105,29 @@ impl FontRender {
         // (line_nr)*(total_line_height) - y_offset > winow.height means line starts below bottom of screen
         let last_line = ((self.style.vheight as f32 + y_scroll)/line_height).ceil(); // TODO: max with num lines
         let (graphemes, (mut char_ind, ngraphemes)) = buffer.nowrap_lines(start_line as usize, last_line as usize);
+
+        // the cache of the top left corner of each glyph; specifically y=ascent, 
+        // so the top of most normal capital letters
         let mut pos_cache = HashMap::with_capacity(ngraphemes);
 
         let mut missing = vec![];
 
         let mut pen_x = 0f32;
         let mut pen_y = self.style.ascent;
+
+        let off_x = self.style.voffset_x;
+        let off_y = start_line*line_height - y_scroll + self.style.voffset_y;
         scene
             .draw_glyphs(&self.font)
             .font_size(self.style.font_size)
             .brush(&peniko::Brush::Solid(self.style.fg_color))
-            .transform(Affine::translate((self.style.voffset_x as f64, (start_line*line_height - y_scroll + self.style.voffset_y) as f64)))
+            .transform(Affine::translate((off_x as f64, off_y as f64)))
             .glyph_transform(None)
             .draw(
                 NonZero,
                 graphemes.filter_map(|c| {
                     let c = c.to_string().chars().nth(0).unwrap();
-                    pos_cache.insert(char_ind, (pen_x, pen_y));
+                    pos_cache.insert(char_ind, ((pen_x, pen_y), (pen_x + off_x, pen_y + off_y)));
                     char_ind += 1;
 
                     // we skip \n and \t. Otherwise try looking in the 
@@ -131,7 +137,7 @@ impl FontRender {
                         pen_x = 0.;
                         None
                     } else if c == '\t' {
-                        pen_x += self.style.tab_width;
+                        pen_x += self.style.tab_width; // TODO: should be `n*space_len`
                         None
                     } else {
                         let x = pen_x;
@@ -272,6 +278,8 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
         s.spawn(buffer_op_handler(buffer_rx, buffer_ref.clone(), || window.request_redraw()));
 
         let mut mods = Modifiers::default();
+        let mut glyph_pos_cache = HashMap::new();
+        let mut curr_pos = PhysicalPosition {x: 0., y: 0.};
 
         event_loop.run(move |ev, elwt| match ev {
             // maybe should check that window_id of WindowEvent matches the state.window.id()
@@ -300,6 +308,28 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                         },
                     }
                 },
+                WindowEvent::MouseInput { device_id: _, state, button } => {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        let mut closest = None;
+                        let mut closest_dist = f32::MAX;
+                        let x = curr_pos.x as f32;
+                        let y = curr_pos.y as f32;
+                        for (i, ((_, _), (x1, y1))) in glyph_pos_cache.iter() {
+                            let dx = x - x1;
+                            let dy = y - (y1-ascent/2.);
+                            let dist = dx*dx + dy*dy;
+                            if dist < closest_dist {
+                                closest = Some(i);
+                                closest_dist = dist;
+                            }
+                        }
+                        if let Some(i) = closest {
+                            buffer_tx.send(BufferOp::SetMainCursor(*i)).unwrap();
+                        }
+                    } else {
+                        log::info!("mouse input: {state:?}, {button:?}");
+                    }
+                },
                 WindowEvent::ModifiersChanged(state) => {
                     mods = state
                 },
@@ -309,6 +339,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     } else {
                         state.window.set_cursor_icon(CursorIcon::Text);
                     }
+                    curr_pos = position;
                 },
                 WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
                     if event.state != ElementState::Released {
@@ -344,16 +375,16 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     let frame = state.surface.surface.get_current_texture().unwrap();
                     scene.reset();
                     let buf = buffer_ref.load();
-                    let glyph_pos_cache = font_render.render(&mut scene, scroll_y, &buf);
+                    glyph_pos_cache = font_render.render(&mut scene, scroll_y, &buf);
                     for c in &*buf.cursors {
                         if let Some(pos) = glyph_pos_cache.get(&c.start) {
-                            let (x, y) = *pos;
+                            let ((x, y), (_, _)) = *pos;
                             // draw cursor
                             let pos = ((x + font_render.style.voffset_x) as f64 - CURSOR_WIDTH/2., (y + font_render.style.voffset_y - font_render.style.ascent) as f64);
                             scene.fill(NonZero, Affine::translate(pos), font_render.style.cursor_color, None, &cursor_shape);
                             if !c.is_empty() {
                                 if let Some(pos) = glyph_pos_cache.get(&c.end()) {
-                                    let (end_x, end_y) = *pos;
+                                    let ((end_x, end_y), (_, _)) = *pos;
                                     let selection = Rect::new(x.min(end_x) as f64, 0., (x - end_x).abs() as f64, font_render.style.line_height as f64);
                                     assert!(end_y == y);
                                     let inframe = Affine::translate((font_render.style.voffset_x as f64, font_render.style.voffset_y as f64));
