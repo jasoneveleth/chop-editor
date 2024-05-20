@@ -103,12 +103,13 @@ impl FontRender {
         // y_scroll = start_line * line_height + ~~~~ means next line starts below top of screen
         let start_line = (y_scroll/line_height).floor().max(0.);
         // (line_nr)*(total_line_height) - y_offset > winow.height means line starts below bottom of screen
-        let last_line = ((self.style.vheight as f32 + y_scroll)/line_height).ceil(); // TODO: max with num lines
-        let (graphemes, (mut char_ind, ngraphemes)) = buffer.nowrap_lines(start_line as usize, last_line as usize);
+        let last_line = ((self.style.vheight as f32 + y_scroll)/line_height).ceil().min((buffer.num_lines()-1) as f32);
+        println!("start_line: {}, last_line: {}", start_line, last_line);
+        let (graphemes, mut char_ind) = buffer.nowrap_lines(start_line as usize, last_line as usize);
 
         // the cache of the top left corner of each glyph; specifically y=ascent, 
         // so the top of most normal capital letters
-        let mut pos_cache = HashMap::with_capacity(ngraphemes);
+        let mut pos_cache = HashMap::new();
 
         let mut missing = vec![];
 

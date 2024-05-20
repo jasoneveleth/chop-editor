@@ -3,10 +3,10 @@ use std::iter::Iterator;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::fs::read_to_string;
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_segmentation::Graphemes;
+use crop::Rope;
 
 use arc_swap::ArcSwapAny;
+use unicode_segmentation::UnicodeSegmentation;
 use std::sync::mpsc;
 
 pub enum BufferOp {
@@ -49,7 +49,7 @@ pub struct TextBuffer {
     pub cursors: Arc<[Selection]>,
     // this is the index
     pub main_cursor: usize,
-    contents: Arc<str>,
+    contents: Rope,
 }
 
 impl Selection {
@@ -74,14 +74,16 @@ impl TextBuffer {
         if size >= three_gb {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "File was larger than 3GB"));
         }
-        let contents = Arc::from(read_to_string(filename_str)?);
+        let contents = Rope::from(read_to_string(filename_str)?);
         let fi = FileInfo {filename, is_modified: false, file_time: SystemTime::now()};
         let cursors = Arc::from([Selection{start: 0, offset: 0}]);
         Ok(Self {file: Some(fi), cursors, main_cursor: 0, contents})
     }
 
     pub fn write(&self, filename: &Path) -> Result<Self, std::io::Error> {
-        std::fs::write(filename, &*self.contents)?;
+        for chunk in self.contents.chunks() {
+            std::fs::write(filename, chunk)?;
+        }
         let fi = Some(FileInfo {
                 filename: Arc::from(filename),
                 is_modified: false,
@@ -97,52 +99,18 @@ impl TextBuffer {
     }
 
     pub fn num_graphemes(&self) -> usize {
-        let s: &str = &self.contents;
-        UnicodeSegmentation::graphemes(s, true).count()
+        return self.contents.graphemes().count();
     }
 
     // lines are 0 indexed
     // end is not included
-    pub fn nowrap_lines(&self, start: usize, end: usize) -> (Graphemes, (usize, usize)) {
-        let s: &str = &self.contents;
-        let graphemes = UnicodeSegmentation::graphemes(s, true);
-        let mut grapheme_index = -1;
-        let mut num_lines = 0;
-        let mut byte_len = 0;
-        for g in graphemes {
-            if num_lines == start {
-                break;
-            } else {
-                grapheme_index += 1; // get i onto the index of g in graphemes
-                byte_len += g.len();
-                if g == "\n" {
-                    num_lines += 1;
-                }
-            }
-        }
-        grapheme_index += 1; // go onto the character after the newline
+    pub fn nowrap_lines(&self, start: usize, end: usize) -> (crop::iter::Graphemes, usize) {
+        let byte_len = self.contents.byte_of_line(start);
+        let byte_len2 = self.contents.byte_of_line(end);
+        let gs = self.contents.byte_slice(byte_len..byte_len2).graphemes();
 
-        // now `grapheme_index` is at the first grapheme of the start line
-        // byte_len is the number of bytes up to that character
-        // and num_lines = start
-
-        let mut byte_len2 = 0;
-        for byte in &self.contents.as_bytes()[byte_len..] {
-            if num_lines == end {
-                break;
-            }
-            if *byte == b'\n' {
-                num_lines += 1;
-            }
-            byte_len2 += 1;
-        }
-        let byte_array = &self.contents.as_bytes()[byte_len..byte_len+byte_len2];
-
-        // proof of safety: we are guarenteed that from newline to newline is valid utf8, if we
-        // started with valid utf8
-        let string = unsafe { std::str::from_utf8_unchecked(byte_array) };
-        let diff = UnicodeSegmentation::graphemes(string, true).count();
-        (UnicodeSegmentation::graphemes(string, true), (grapheme_index as usize, diff))
+        let grapheme_index = self.contents.byte_slice(..byte_len).graphemes().count();
+        (gs, grapheme_index as usize)
     }
 
     pub fn move_horizontal(&self, offset: i64) -> Self {
@@ -172,6 +140,14 @@ impl TextBuffer {
         } else {
             None
         };
+
+        let mut contents = self.contents.clone();
+        for cursor in self.cursors.iter().rev() {
+            let start = grapheme_to_byte(contents.graphemes(), (cursor.start-1).max(0));
+            let end = grapheme_to_byte(contents.graphemes(), cursor.start);
+            contents.delete(start..end);
+        }
+
         let update = if self.cursors[self.main_cursor].offset == 0 {
             // adding 1 in zero case fixes it
             |(i, s): (usize, &Selection)| Selection{start: s.start + (s.start == 0) as usize - (i+1), offset: 0 as i64}
@@ -180,20 +156,6 @@ impl TextBuffer {
         };
         let cursors: Vec<Selection> = self.cursors.iter().enumerate().map(update).collect();
         let cursors = Arc::from(cursors);
-
-        let mut contents = String::new();
-        let mut cursor_ind = 0;
-        for (i, g) in self.contents.graphemes(true).enumerate() {
-            if cursor_ind < self.cursors.len() {
-                let start = self.cursors[cursor_ind].start;
-                if start != 0 && i == start-1 {
-                    cursor_ind += 1;
-                    continue;
-                }
-            }
-            contents += g;
-        }
-        let contents = Arc::from(contents);
 
         Self {file, cursors, main_cursor: self.main_cursor, contents}
     }
@@ -208,24 +170,19 @@ impl TextBuffer {
         } else {
             None
         };
-        let cursors: Vec<Selection> = self.cursors.iter().map(|s| Selection{start: s.start + text.len(), offset: 0}).collect();
+        let mut contents = self.contents.clone();
+        let incr = UnicodeSegmentation::graphemes(text, true).count();
+        let cursors: Vec<Selection> = self.cursors.iter().enumerate().map(|(i, s)| {
+            let adjusted_start = s.start + incr*i;
+            contents.insert(grapheme_to_byte(contents.graphemes(), adjusted_start), text);
+            Selection{start: adjusted_start + incr, offset: 0}
+        }).collect();
         let cursors = Arc::from(cursors);
-
-        let mut contents = String::new();
-        let mut cursor_ind = 0;
-        for (i, g) in self.contents.graphemes(true).enumerate() {
-            if cursor_ind < self.cursors.len() && i == self.cursors[cursor_ind].start {
-                contents += text;
-                cursor_ind += 1;
-            }
-            contents += g;
-        }
-        let contents = Arc::from(contents);
 
         Self {file, cursors, main_cursor: self.main_cursor, contents}
     }
 
-    pub fn lines(&self) -> std::str::Lines {
+    pub fn lines(&self) -> crop::iter::Lines {
         self.contents.lines()
     }
 }
@@ -237,7 +194,7 @@ mod tests {
         TextBuffer {
             file: None, 
             cursors: Arc::from(cursors), 
-            contents: Arc::from(s), 
+            contents: Rope::from(s), 
             main_cursor: 0
         }
     }
@@ -247,9 +204,11 @@ mod tests {
         let buffer = create_buffer("abcdefghigh", vec![Selection {start: 1, offset: 1}, Selection {start: 5, offset: 1}, Selection {start: 8, offset: 1}]);
         let buffer = buffer.insert("xz");
 
+        let yee = buffer.contents.chunks().collect::<String>();
+
         // Assert that the buffer is created as expected
-        assert_eq!(buffer.contents.as_ref(), "axzbcdexzfghxzigh");
-        for (a, b) in buffer.cursors.iter().zip(&[Selection{start: 3, offset: 2}, Selection{start: 9, offset: 2}, Selection{start: 14, offset: 2}]) {
+        assert_eq!(yee, "axzbcdexzfghxzigh");
+        for (a, b) in buffer.cursors.iter().zip(&[Selection{start: 3, offset: 0}, Selection{start: 9, offset: 0}, Selection{start: 14, offset: 0}]) {
             assert_eq!(a, b);
         }
     }
@@ -272,7 +231,9 @@ mod tests {
         let buffer = create_buffer(s, cursors);
         let buffer = buffer.delete();
 
-        assert_eq!(buffer.contents.as_ref(), "bcdf\nfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh");
+        let yee = buffer.contents.chunks().collect::<String>();
+
+        assert_eq!(yee, "bcdf\nfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh");
         for (a, b) in buffer.cursors.iter().zip(&[Selection{start: 0, offset: 0}, Selection{start: 3, offset: 0}, Selection{start: 5, offset: 0}]) {
             assert_eq!(a, b);
         }
@@ -325,6 +286,7 @@ mod tests {
 
         // newline ending case
         let cursors = vec![];
+        let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh\n";
         let buffer = create_buffer(s, cursors);
         let (b, _) = buffer.nowrap_lines(5, 6);
 
@@ -338,13 +300,18 @@ mod tests {
 
     #[test]
     fn test_file_too_large() {
-        let filename = "/Users/jason/Documents/media/videos/iMovie videos/Jurasic Park - Dear Donohue.mov";
+        let filename = "/Users/jason/src/benchmarks/fastest-grep/folded.txt";
         match TextBuffer::from_filename(filename) {
             Ok(_) => assert!(false),
-            Err(e) => assert_eq!(e.to_string().as_str(), "File was larger than 7GB"),
+            Err(e) => assert_eq!(e.to_string().as_str(), "File was larger than 3GB"),
         }
     }
 }
+
+fn grapheme_to_byte(graphemes: crop::iter::Graphemes, i: usize) -> usize {
+    graphemes.take(i).map(|g| g.len()).sum()
+}
+
 
 pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>, request_redraw: impl Fn()) -> impl FnOnce(&crossbeam::thread::Scope<'_>) {
     move |_| {
