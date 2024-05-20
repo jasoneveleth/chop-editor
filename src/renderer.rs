@@ -104,7 +104,6 @@ impl FontRender {
         let start_line = (y_scroll/line_height).floor().max(0.);
         // (line_nr)*(total_line_height) - y_offset > winow.height means line starts below bottom of screen
         let last_line = ((self.style.vheight as f32 + y_scroll)/line_height).ceil().min((buffer.num_lines()-1) as f32);
-        println!("start_line: {}, last_line: {}", start_line, last_line);
         let (graphemes, mut char_ind) = buffer.nowrap_lines(start_line as usize, last_line as usize);
 
         // the cache of the top left corner of each glyph; specifically y=ascent, 
@@ -318,7 +317,8 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                         for (i, ((_, _), (x1, y1))) in glyph_pos_cache.iter() {
                             let dx = x - x1;
                             let dy = y - (y1-ascent/2.);
-                            let dist = dx*dx + dy*dy;
+                            // TODO: this is sooo wrong, should only look at glyphs on the line
+                            let dist = dx*dx + 100.*dy*dy; 
                             if dist < closest_dist {
                                 closest = Some(i);
                                 closest_dist = dist;
