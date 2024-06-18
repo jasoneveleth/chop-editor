@@ -103,7 +103,7 @@ impl FontRender {
         // y_scroll = start_line * line_height + ~~~~ means next line starts below top of screen
         let start_line = (y_scroll/line_height).floor().max(0.);
         // (line_nr)*(total_line_height) - y_offset > winow.height means line starts below bottom of screen
-        let last_line = ((self.style.vheight as f32 + y_scroll)/line_height).ceil().min((buffer.num_lines()-1) as f32);
+        let last_line = ((self.style.vheight as f32 + y_scroll)/line_height).ceil().min((buffer.num_lines()) as f32);
         let (graphemes, mut char_ind) = buffer.nowrap_lines(start_line as usize, last_line as usize);
 
         // the cache of the top left corner of each glyph; specifically y=ascent, 
@@ -325,7 +325,11 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                             }
                         }
                         if let Some(i) = closest {
-                            buffer_tx.send(BufferOp::SetMainCursor(*i)).unwrap();
+                            if mods.lalt_state() == ModifiersKeyState::Pressed || mods.ralt_state() == ModifiersKeyState::Pressed {
+                                buffer_tx.send(BufferOp::AddCursor(*i)).unwrap();
+                            } else {
+                                buffer_tx.send(BufferOp::SetMainCursor(*i)).unwrap();
+                            }
                         }
                     } else {
                         log::info!("mouse input: {state:?}, {button:?}");
@@ -377,7 +381,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     scene.reset();
                     let buf = buffer_ref.load();
                     glyph_pos_cache = font_render.render(&mut scene, scroll_y, &buf);
-                    for c in &*buf.cursors {
+                    for c in buf.cursors_iter() {
                         if let Some(pos) = glyph_pos_cache.get(&c.start) {
                             let ((_, _), (x, y)) = *pos;
                             // draw cursor

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use std::fs::read_to_string;
 use crop::Rope;
+use im::OrdMap;
 
 use arc_swap::ArcSwapAny;
 use unicode_segmentation::UnicodeSegmentation;
@@ -15,6 +16,7 @@ pub enum BufferOp {
     Save,
     MoveHorizontal(i64),
     SetMainCursor(usize),
+    AddCursor(usize),
 }
 
 // let | be the cursor, and \ be the end of the selection
@@ -46,9 +48,9 @@ pub struct FileInfo {
 pub struct TextBuffer {
     pub file: Option<FileInfo>,
     // !!! this should always be sorted
-    pub cursors: Arc<[Selection]>,
+    pub cursors: OrdMap<usize, Selection>,
     // this is the index
-    pub main_cursor: usize,
+    pub main_cursor_start: usize,
     contents: Rope,
 }
 
@@ -76,8 +78,10 @@ impl TextBuffer {
         }
         let contents = Rope::from(read_to_string(filename_str)?);
         let fi = FileInfo {filename, is_modified: false, file_time: SystemTime::now()};
-        let cursors = Arc::from([Selection{start: 0, offset: 0}]);
-        Ok(Self {file: Some(fi), cursors, main_cursor: 0, contents})
+        let mut cursors: OrdMap<usize, Selection> = OrdMap::new();
+        let start = 0;
+        cursors.insert(start, Selection{start, offset: 0});
+        Ok(Self {file: Some(fi), cursors, main_cursor_start: 0, contents})
     }
 
     pub fn write(&self, filename: &Path) -> Result<Self, std::io::Error> {
@@ -91,7 +95,7 @@ impl TextBuffer {
         });
         let cursors = self.cursors.clone();
         let contents = self.contents.clone();
-        Ok(Self {file: fi, cursors, main_cursor: self.main_cursor, contents})
+        Ok(Self {file: fi, cursors, main_cursor_start: self.main_cursor_start, contents})
     }
 
     pub fn num_lines(&self) -> usize {
@@ -114,76 +118,83 @@ impl TextBuffer {
     }
 
     pub fn move_horizontal(&self, offset: i64) -> Self {
-        let file = if let Some(fileinfo) = &self.file {
-            Some(FileInfo {
-                filename: fileinfo.filename.clone(),
-                is_modified: fileinfo.is_modified,
-                file_time: fileinfo.file_time,
-            })
-        } else {
-            None
-        };
-        let cursors: Vec<_> = self.cursors.iter().map(|s| Selection{start: ((s.start as i64 + offset).max(0) as usize).min(self.num_graphemes()-1), offset: 0 as i64}).collect();
-        let cursors = Arc::from(cursors);
+        let file = self.file.clone();
+        let cursors: OrdMap<_, _> = self.cursors_iter().map(|s| {
+            let start = ((s.start as i64 + offset) as usize).max(0).min(self.num_graphemes()-1);
+            (start, Selection{start, offset: 0 as i64})
+        }).collect();
         let contents = self.contents.clone();
+        
+        let main_cursor_start = ((self.main_cursor_start as i64 + offset) as usize).max(0).min(self.num_graphemes()-1);
 
-        Self {file, cursors, main_cursor: self.main_cursor, contents}
+        Self {file, cursors, main_cursor_start, contents}
     }
 
     pub fn delete(&self) -> Self {
-        let file = if let Some(fileinfo) = &self.file {
-            Some(FileInfo {
-                filename: fileinfo.filename.clone(),
-                is_modified: true,
-                file_time: fileinfo.file_time,
-            })
-        } else {
-            None
-        };
+        let file = self.file.clone();
 
         let mut contents = self.contents.clone();
-        for cursor in self.cursors.iter().rev() {
+        for cursor in self.cursors_iter().rev() {
             let start = grapheme_to_byte(contents.graphemes(), (cursor.start-1).max(0));
             let end = grapheme_to_byte(contents.graphemes(), cursor.start);
             contents.delete(start..end);
         }
 
-        let update = if self.cursors[self.main_cursor].offset == 0 {
+        let update = if self.cursors[&self.main_cursor_start].offset == 0 {
             // adding 1 in zero case fixes it
-            |(i, s): (usize, &Selection)| Selection{start: s.start + (s.start == 0) as usize - (i+1), offset: 0 as i64}
+            |(i, s): (usize, &Selection)| {
+                let start = s.start + (s.start == 0) as usize - (i+1);
+                (start, Selection{start, offset: 0 as i64})
+            }
         } else {
-            |(_, s): (usize, &Selection)| Selection{start: s.end(), offset: 0 as i64}
+            |(_, s): (usize, &Selection)| (s.end(), Selection{start: s.end(), offset: 0 as i64})
         };
-        let cursors: Vec<Selection> = self.cursors.iter().enumerate().map(update).collect();
-        let cursors = Arc::from(cursors);
+        let cursors: OrdMap<_, Selection> = self.cursors_iter().enumerate().map(update).collect();
 
-        Self {file, cursors, main_cursor: self.main_cursor, contents}
+        // super awkward to keep the main_cursor in sync
+        let mut main_cursor_start = usize::MAX;
+        for (old, new) in self.cursors_iter().zip(cursors.values()) {
+            if old.start == self.main_cursor_start {
+                main_cursor_start = new.start;
+                break;
+            }
+        }
+        assert!(main_cursor_start != usize::MAX);
+
+        Self {file, cursors, main_cursor_start, contents}
     }
 
     pub fn insert(&self, text: &str) -> Self {
-        let file = if let Some(fileinfo) = &self.file {
-            Some(FileInfo {
-                filename: fileinfo.filename.clone(),
-                is_modified: true,
-                file_time: fileinfo.file_time,
-            })
-        } else {
-            None
-        };
+        let file = self.file.clone();
         let mut contents = self.contents.clone();
         let incr = UnicodeSegmentation::graphemes(text, true).count();
-        let cursors: Vec<Selection> = self.cursors.iter().enumerate().map(|(i, s)| {
+        let cursors: OrdMap<_, Selection> = self.cursors_iter().enumerate().map(|(i, s)| {
             let adjusted_start = s.start + incr*i;
             contents.insert(grapheme_to_byte(contents.graphemes(), adjusted_start), text);
-            Selection{start: adjusted_start + incr, offset: 0}
+            let start = adjusted_start + incr;
+            (start, Selection{start, offset: 0})
         }).collect();
-        let cursors = Arc::from(cursors);
 
-        Self {file, cursors, main_cursor: self.main_cursor, contents}
+        // super awkward to keep the main_cursor in sync, since there's no easy way to 
+        // know what index the main cursor is.
+        let mut main_cursor_start = usize::MAX;
+        for (old, new) in self.cursors_iter().zip(cursors.values()) {
+            if old.start == self.main_cursor_start {
+                main_cursor_start = new.start;
+                break;
+            }
+        }
+        assert!(main_cursor_start != usize::MAX);
+
+        Self {file, cursors, main_cursor_start, contents}
     }
 
     pub fn lines(&self) -> crop::iter::Lines {
         self.contents.lines()
+    }
+
+    pub fn cursors_iter(&self) -> impl DoubleEndedIterator<Item = &Selection> {
+        self.cursors.values()
     }
 }
 
@@ -193,9 +204,9 @@ mod tests {
     fn create_buffer(s: &str, cursors: Vec<Selection>) -> TextBuffer {
         TextBuffer {
             file: None, 
-            cursors: Arc::from(cursors), 
+            cursors: cursors.into_iter().map(|s| (s.start, s)).collect(), 
             contents: Rope::from(s), 
-            main_cursor: 0
+            main_cursor_start: 0
         }
     }
 
@@ -208,7 +219,7 @@ mod tests {
 
         // Assert that the buffer is created as expected
         assert_eq!(yee, "axzbcdexzfghxzigh");
-        for (a, b) in buffer.cursors.iter().zip(&[Selection{start: 3, offset: 0}, Selection{start: 9, offset: 0}, Selection{start: 14, offset: 0}]) {
+        for (a, b) in buffer.cursors_iter().zip(&[Selection{start: 3, offset: 0}, Selection{start: 9, offset: 0}, Selection{start: 14, offset: 0}]) {
             assert_eq!(a, b);
         }
     }
@@ -234,7 +245,7 @@ mod tests {
         let yee = buffer.contents.chunks().collect::<String>();
 
         assert_eq!(yee, "bcdf\nfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh");
-        for (a, b) in buffer.cursors.iter().zip(&[Selection{start: 0, offset: 0}, Selection{start: 3, offset: 0}, Selection{start: 5, offset: 0}]) {
+        for (a, b) in buffer.cursors_iter().zip(&[Selection{start: 0, offset: 0}, Selection{start: 3, offset: 0}, Selection{start: 5, offset: 0}]) {
             assert_eq!(a, b);
         }
     }
@@ -339,14 +350,26 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<Ar
                 },
                 BufferOp::SetMainCursor(i) => {
                     let buffer = buffer_ref.load();
-                    let mut cursors = (*buffer.cursors).to_owned();
-                    cursors[buffer.main_cursor].start = i;
-                    cursors[buffer.main_cursor].offset = 0;
+                    let mut cursors = buffer.cursors.clone();
+                    let key = &buffer.main_cursor_start;
+                    cursors.remove(key);
+                    cursors.insert(i, Selection{start: i, offset: 0});
                     buffer_ref.store(Arc::new(TextBuffer {
-                        main_cursor: buffer.main_cursor,
+                        main_cursor_start: buffer.main_cursor_start,
                         contents: buffer.contents.clone(),
                         file: buffer.file.clone(),
-                        cursors: Arc::from(cursors.as_slice()),
+                        cursors,
+                    }));
+                },
+                BufferOp::AddCursor(start) => {
+                    let buffer = buffer_ref.load();
+                    let mut cursors = buffer.cursors.clone();
+                    cursors.insert(start, Selection{start, offset: 0});
+                    buffer_ref.store(Arc::new(TextBuffer {
+                        main_cursor_start: buffer.main_cursor_start,
+                        contents: buffer.contents.clone(),
+                        file: buffer.file.clone(),
+                        cursors,
                     }));
                 },
             }
