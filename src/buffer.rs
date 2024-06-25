@@ -84,6 +84,8 @@ impl TextBuffer {
         Ok(Self {file: Some(fi), cursors, main_cursor_start: 0, contents})
     }
 
+    // has to return Self because writing updates the file info 
+    // (when they were last in sync and if it's modified)
     pub fn write(&self, filename: &Path) -> Result<Self, std::io::Error> {
         for chunk in self.contents.chunks() {
             std::fs::write(filename, chunk)?;
@@ -355,7 +357,7 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<Ar
                     cursors.remove(key);
                     cursors.insert(i, Selection{start: i, offset: 0});
                     buffer_ref.store(Arc::new(TextBuffer {
-                        main_cursor_start: buffer.main_cursor_start,
+                        main_cursor_start: i,
                         contents: buffer.contents.clone(),
                         file: buffer.file.clone(),
                         cursors,
