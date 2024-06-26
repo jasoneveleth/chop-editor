@@ -28,6 +28,7 @@ use std::sync::mpsc;
 use crate::buffer::TextBuffer;
 use crate::buffer::BufferOp;
 use crate::buffer::buffer_op_handler;
+use crate::filter_map::{FMTOption, filter_map_terminate};
 
 pub struct Args {
     pub font_size: f32, 
@@ -104,7 +105,7 @@ impl FontRender {
         let start_line = (y_scroll/line_height).floor().max(0.);
         // (line_nr)*(total_line_height) - y_offset > winow.height means line starts below bottom of screen
         let last_line = ((self.style.vheight as f32 + y_scroll)/line_height).ceil().min((buffer.num_lines()) as f32);
-        let (graphemes, mut char_ind) = buffer.nowrap_lines(start_line as usize, last_line as usize);
+        let (graphemes, start_index) = buffer.nowrap_lines(start_line as usize, last_line as usize);
 
         // the cache of the top left corner of each glyph; specifically y=ascent, 
         // so the top of most normal capital letters
@@ -114,6 +115,8 @@ impl FontRender {
 
         let mut pen_x = 0f32;
         let mut pen_y = self.style.ascent;
+        let mut line_nr = start_line as usize;
+        println!("start_line: {}, last_line: {}", start_line, last_line);
 
         let off_x = self.style.voffset_x;
         let off_y = start_line*line_height - y_scroll + self.style.voffset_y;
@@ -125,31 +128,36 @@ impl FontRender {
             .glyph_transform(None)
             .draw(
                 NonZero,
-                graphemes.filter_map(|c| {
+                filter_map_terminate(graphemes.enumerate(), |(i, c)| {
                     let c = c.to_string().chars().nth(0).unwrap();
-                    char_ind += 1;
                     if c != '\n' && pen_x > self.style.vwidth { // if we're off screen just skip
-                        return None
+                        return if line_nr >= (last_line as usize) - 1 {
+                            // if we're off screen and last line we're done
+                            FMTOption::Terminate
+                        } else {
+                            FMTOption::None
+                        };
                     }
 
-                    pos_cache.insert(char_ind-1, ((pen_x, pen_y), (pen_x + off_x, pen_y + off_y)));
+                    pos_cache.insert(i + start_index, ((pen_x, pen_y), (pen_x + off_x, pen_y + off_y)));
 
                     // we skip \n and \t. Otherwise try looking in the 
                     // font and the fallback font.
                     if c == '\n' {
+                        line_nr += 1;
                         pen_y += line_height;
                         pen_x = 0.;
-                        None
+                        FMTOption::None
                     } else if c == '\t' {
                         pen_x += self.style.tab_width; // TODO: should be `n*space_len`
-                        None
+                        FMTOption::None
                     } else {
                         let x = pen_x;
                         let y = pen_y;
                         if let Some(gid) = charmap.map(c) {
                             // if we find it in the normal font
                             pen_x += glyph_metrics.advance_width(gid).unwrap_or_default();
-                            Some(vello::glyph::Glyph {
+                            FMTOption::Some(vello::glyph::Glyph {
                                 id: gid.to_u16() as u32,
                                 x,
                                 y,
@@ -158,12 +166,12 @@ impl FontRender {
                             // if we find it in the fallback font
                             missing.push((gid, (x, y)));
                             pen_x += fallback_glyph_metrics.advance_width(gid).unwrap_or_default();
-                            None
+                            FMTOption::None
                         } else {
                             // if we don't find it, use the placeholder of the normal font.
                             let gid = skrifa::GlyphId::default();
                             pen_x += glyph_metrics.advance_width(gid).unwrap_or_default();
-                            Some(vello::glyph::Glyph {
+                            FMTOption::Some(vello::glyph::Glyph {
                                 id: gid.to_u16() as u32,
                                 x,
                                 y,
@@ -379,6 +387,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     }
                 },
                 WindowEvent::RedrawRequested => {
+                    println!("redraw requested");
                     let width = state.surface.config.width;
                     let height = state.surface.config.height;
                     let frame = state.surface.surface.get_current_texture().unwrap();
@@ -402,6 +411,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                             }
                         }
                     }
+                    println!("drawing thing");
                     // draw titlebar
                     scene.fill(NonZero, Affine::IDENTITY, font_render.style.bg_color, None, &titlebar);
                     renderer
