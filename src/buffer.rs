@@ -2,7 +2,8 @@ use std::path::Path;
 use std::iter::Iterator;
 use std::sync::Arc;
 use std::time::SystemTime;
-use std::fs::read_to_string;
+use std::fs::{read_to_string, OpenOptions};
+use std::io::Write;
 use crop::Rope;
 use im::OrdMap;
 
@@ -87,9 +88,13 @@ impl TextBuffer {
     // has to return Self because writing updates the file info 
     // (when they were last in sync and if it's modified)
     pub fn write(&self, filename: &Path) -> Result<Self, std::io::Error> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(filename)?;
         for chunk in self.contents.chunks() {
-            std::fs::write(filename, chunk)?;
+            file.write_all(chunk.as_bytes())?;
         }
+
         let fi = Some(FileInfo {
                 filename: Arc::from(filename),
                 is_modified: false,
