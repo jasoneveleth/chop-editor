@@ -9,6 +9,7 @@ use im::OrdMap;
 
 use arc_swap::ArcSwapAny;
 use unicode_segmentation::UnicodeSegmentation;
+use winit::event_loop::EventLoopProxy;
 use std::sync::mpsc;
 
 pub enum BufferOp {
@@ -18,6 +19,11 @@ pub enum BufferOp {
     MoveHorizontal(i64),
     SetMainCursor(usize),
     AddCursor(usize),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum BufferEmittedEvent {
+    Redraw,
 }
 
 // let | be the cursor, and \ be the end of the selection
@@ -339,7 +345,7 @@ fn grapheme_to_byte(graphemes: crop::iter::Graphemes, i: usize) -> usize {
 }
 
 
-pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>, request_redraw: impl Fn(bool)) -> impl FnOnce(&crossbeam::thread::Scope<'_>) {
+pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>, event_loop_proxy: EventLoopProxy<BufferEmittedEvent>) -> impl FnOnce(&crossbeam::thread::Scope<'_>) {
     move |_| {
         while let Ok(received) = buffer_rx.recv() {
             match received {
@@ -388,13 +394,9 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<Ar
                     }));
                 },
             }
-            let buffer = buffer_ref.load();
-            let dirty = if let Some(fi) = &buffer.file {
-                fi.is_modified
-            } else {
-                false
-            };
-            request_redraw(dirty);
+            if let Err(e) = event_loop_proxy.send_event(BufferEmittedEvent::Redraw) {
+                log::error!("failed to send redraw event: {}", e);
+            }
         }
     }
 }

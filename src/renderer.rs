@@ -6,7 +6,7 @@ use vello::peniko::Fill::NonZero;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{WindowEvent, Modifiers};
 use winit::event::{Event, MouseScrollDelta, ElementState, MouseButton};
-use winit::event_loop::EventLoop;
+use winit::event_loop::EventLoopBuilder;
 use winit::window::CursorIcon;
 use winit::window::WindowBuilder;
 use winit::keyboard::{Key, NamedKey, ModifiersKeyState};
@@ -25,7 +25,7 @@ use arc_swap::ArcSwapAny;
 use crossbeam::thread;
 use std::sync::mpsc;
 
-use crate::buffer::TextBuffer;
+use crate::buffer::{TextBuffer, BufferEmittedEvent};
 use crate::buffer::BufferOp;
 use crate::buffer::buffer_op_handler;
 use crate::filter_map::{FMTOption, filter_map_terminate};
@@ -40,6 +40,11 @@ pub struct Args {
 struct State<'s> {
     surface: RenderSurface<'s>,
     window: Arc<Window>,
+    font_render: FontRender,
+    scene: Scene,
+    renderer: Renderer,
+    render_cx: RenderContext,
+    scroll_y: f32,
 }
 
 struct Style {
@@ -55,6 +60,8 @@ struct Style {
     line_height: f32,
     tab_width: f32,
     ascent: f32,
+    cursor_shape: Rect,
+    titlebar: Rect,
 }
 
 struct FontRender {
@@ -63,6 +70,8 @@ struct FontRender {
     style: Style,
 }
 
+// don't want to write this out
+type GlyphPosCache = HashMap<usize, ((f32, f32), (f32, f32))>;
 
 // const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/NotoColorEmoji-Regular.ttf");
 // const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/System/Library/Fonts/Apple Color Emoji.ttc");
@@ -74,7 +83,7 @@ const CURSOR_WIDTH: f64 = 4.;
 const CURSOR_HEIGHT: f64 = 35.;
 
 impl FontRender {
-    fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> HashMap<usize, ((f32, f32), (f32, f32))> {
+    fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> GlyphPosCache {
         // main font
         let file_ref = skrifa::raw::FileRef::new(self.font.data.as_ref()).unwrap();
         let font_ref = match file_ref {
@@ -218,6 +227,65 @@ fn get_font_metrics(font: &peniko::Font, font_size: f32) -> (f32, f32) {
     (line_height * 2., metrics.ascent)
 }
 
+fn redraw_requested_handler(state: &mut State, buffer_ref: &Arc<ArcSwapAny<Arc<TextBuffer>>>, window: &Window) -> GlyphPosCache {
+    let renderer = &mut state.renderer;
+    let scene = &mut state.scene;
+    let font_render = &state.font_render;
+    let width = state.surface.config.width;
+    let height = state.surface.config.height;
+    let frame = state.surface.surface.get_current_texture().unwrap();
+
+    scene.reset();
+    let buf = buffer_ref.load();
+    let dirty = if let Some(fi) = &buf.file {
+        fi.is_modified
+    } else {
+        false
+    };
+    let glyph_pos_cache = font_render.render(scene, state.scroll_y, &buf);
+    for c in buf.cursors_iter() {
+        if let Some(pos) = glyph_pos_cache.get(&c.start) {
+            let ((_, _), (x, y)) = *pos;
+            // draw cursor
+            let pos = (x as f64 - CURSOR_WIDTH/2., (y - font_render.style.ascent/2.) as f64 - CURSOR_HEIGHT/2.);
+            scene.fill(NonZero, Affine::translate(pos), font_render.style.cursor_color, None, &font_render.style.cursor_shape);
+            if !c.is_empty() {
+                if let Some(pos) = glyph_pos_cache.get(&c.end()) {
+                    let ((end_x, end_y), (_, _)) = *pos;
+                    let selection = Rect::new(x.min(end_x) as f64, 0., (x - end_x).abs() as f64, font_render.style.line_height as f64);
+                    assert!(end_y == y);
+                    let inframe = Affine::translate((font_render.style.voffset_x as f64, font_render.style.voffset_y as f64));
+                    scene.fill(NonZero, inframe, font_render.style.selection_color, None, &selection);
+                }
+            }
+        }
+    }
+    // draw titlebar
+    scene.fill(NonZero, Affine::IDENTITY, font_render.style.bg_color, None, &state.font_render.style.titlebar);
+    renderer
+        .render_to_surface(
+            &state.render_cx.devices[0].device,
+            &state.render_cx.devices[0].queue,
+            &scene,
+            &frame,
+            &vello::RenderParams {
+                base_color: font_render.style.bg_color,
+                width,
+                height,
+                antialiasing_method: vello::AaConfig::Msaa16,
+            },
+        )
+        .unwrap();
+    frame.present();
+
+    if dirty {
+        (*window).set_document_edited(true);
+    } else {
+        (*window).set_document_edited(false);
+    }
+    glyph_pos_cache
+}
+
 pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
     let size = LogicalSize {width: 800, height: 600};
     let mut render_cx = RenderContext::new().unwrap();
@@ -231,26 +299,25 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
 
     let font = peniko::Font::new(peniko::Blob::new(Arc::new(args.font_data)), 0);
     let fallback_font = peniko::Font::new(peniko::Blob::new(Arc::new(FALLBACK_FONT_DATA)), 0);
-    let mut scroll_y = 0.; // we want to scroll beyond the top (ie. negative)
     let (line_height, ascent) = get_font_metrics(&font, args.font_size);
 
-    let event_loop = EventLoop::new().unwrap();
+    let event_loop = EventLoopBuilder::with_user_event().build().unwrap();
+    let event_loop_proxy = event_loop.create_proxy();
     let window = Arc::new(wb.build(&event_loop).unwrap());
     let size = window.inner_size();
 
     let surface = render_cx.create_surface(window.clone(), size.width, size.height, Default::default()).block_on().unwrap();
-    let mut state = State { surface, window: window.clone() };
     let device = &render_cx.devices[0].device;
 
     let use_cpu = false;
-    let mut scene = Scene::new();
+    let scene = Scene::new();
     let titlebar = Rect::new(0., 0., size.width as f64, TITLEBAR_HEIGHT as f64);
     let cursor_shape = Rect::new(0., 0., CURSOR_WIDTH, CURSOR_HEIGHT);
     let numthr = NonZeroUsize::new(1);
-    let mut renderer = Renderer::new(
+    let renderer = Renderer::new(
         &device,
         RendererOptions {
-            surface_format: Some(state.surface.format),
+            surface_format: Some(surface.format),
             use_cpu,
             antialiasing_support: vello::AaSupport::all(),
             num_init_threads: numthr,
@@ -271,32 +338,25 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
         tab_width: 10.,
         line_height,
         ascent,
+        cursor_shape,
+        titlebar,
     };
 
-    let mut font_render = FontRender {
+    let font_render = FontRender {
         fallback_font,
         font,
         style,
     };
 
+    let mut state = State { surface, window: window.clone(), scene, font_render, renderer, render_cx, scroll_y: 0.};
 
     let (buffer_tx, buffer_rx) = mpsc::channel();
 
-    thread::scope(|s| {
+    thread::scope(move |s| {
         // INVARIANT: `buffer_ref` SHOULD ONLY EVER BE MODIFIED (`store`d) BY THIS THREAD
         // If this is not upheld, then we have a race condition where the buffer changes
         // between the load, computation, and store, and we miss something
-        s.spawn(buffer_op_handler(buffer_rx, buffer_ref.clone(), |dirty| {
-            // TODO: unfortunately the buffer thread has to do this because it owns the window since it
-            // needs to request a redraw (and I can't figure out how to make it work otherwise)
-            // ideally the renderer does a buffer.load() and call the set_document_edited()
-            if dirty {
-                (*window).set_document_edited(true);
-            } else {
-                (*window).set_document_edited(false);
-            }
-            window.request_redraw()
-        }));
+        s.spawn(buffer_op_handler(buffer_rx, buffer_ref.clone(), event_loop_proxy));
 
         let mut mods = Modifiers::default();
         let mut glyph_pos_cache = HashMap::new();
@@ -309,24 +369,24 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     elwt.exit();
                 },
                 WindowEvent::Resized(size) => {
-                    font_render.style.vheight = size.height as f32 - TITLEBAR_HEIGHT - Y_PADDING;
-                    font_render.style.vwidth = size.width as f32 - X_PADDING;
-                    render_cx.resize_surface(&mut state.surface, size.width, size.height);
+                    state.font_render.style.vheight = size.height as f32 - TITLEBAR_HEIGHT - Y_PADDING;
+                    state.font_render.style.vwidth = size.width as f32 - X_PADDING;
+                    state.render_cx.resize_surface(&mut state.surface, size.width, size.height);
                     state.window.request_redraw();
                 },
                 WindowEvent::MouseWheel{delta, ..} => {
                     match delta {
                         MouseScrollDelta::LineDelta(_, y) => {
                             // Adjust the scroll position based on the scroll delta
-                            scroll_y -= y * 20.0; // Adjust the scroll speed as needed
+                            state.scroll_y -= y * 20.0; // Adjust the scroll speed as needed
                             log::warn!("we don't expect a linedelta from mouse scroll on macOS, ignoring");
                         },
                         MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
-                            scroll_y -= y as f32;
+                            state.scroll_y -= y as f32;
                             let real_buffer = buffer_ref.load();
                             // we want to scroll past the top (ie. negative)
                             let end = (real_buffer.num_lines()-1) as f32 * line_height;
-                            scroll_y = scroll_y.max(0.).min(end);
+                            state.scroll_y = state.scroll_y.max(0.).min(end);
                             state.window.request_redraw();
                         },
                     }
@@ -362,7 +422,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     mods = state
                 },
                 WindowEvent::CursorMoved { device_id: _, position } => {
-                    if position.y <= font_render.style.voffset_y as f64 {
+                    if position.y <= state.font_render.style.voffset_y as f64 {
                         state.window.set_cursor_icon(CursorIcon::Default);
                     } else {
                         state.window.set_cursor_icon(CursorIcon::Text);
@@ -398,48 +458,14 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     }
                 },
                 WindowEvent::RedrawRequested => {
-                    let width = state.surface.config.width;
-                    let height = state.surface.config.height;
-                    let frame = state.surface.surface.get_current_texture().unwrap();
-                    scene.reset();
-                    let buf = buffer_ref.load();
-                    glyph_pos_cache = font_render.render(&mut scene, scroll_y, &buf);
-                    for c in buf.cursors_iter() {
-                        if let Some(pos) = glyph_pos_cache.get(&c.start) {
-                            let ((_, _), (x, y)) = *pos;
-                            // draw cursor
-                            let pos = (x as f64 - CURSOR_WIDTH/2., (y - font_render.style.ascent/2.) as f64 - CURSOR_HEIGHT/2.);
-                            scene.fill(NonZero, Affine::translate(pos), font_render.style.cursor_color, None, &cursor_shape);
-                            if !c.is_empty() {
-                                if let Some(pos) = glyph_pos_cache.get(&c.end()) {
-                                    let ((end_x, end_y), (_, _)) = *pos;
-                                    let selection = Rect::new(x.min(end_x) as f64, 0., (x - end_x).abs() as f64, font_render.style.line_height as f64);
-                                    assert!(end_y == y);
-                                    let inframe = Affine::translate((font_render.style.voffset_x as f64, font_render.style.voffset_y as f64));
-                                    scene.fill(NonZero, inframe, font_render.style.selection_color, None, &selection);
-                                }
-                            }
-                        }
-                    }
-                    // draw titlebar
-                    scene.fill(NonZero, Affine::IDENTITY, font_render.style.bg_color, None, &titlebar);
-                    renderer
-                        .render_to_surface(
-                            &render_cx.devices[0].device,
-                            &render_cx.devices[0].queue,
-                            &scene,
-                            &frame,
-                            &vello::RenderParams {
-                                base_color: font_render.style.bg_color,
-                                width,
-                                height,
-                                antialiasing_method: vello::AaConfig::Msaa16,
-                            },
-                        )
-                        .unwrap();
-                    frame.present();
+                    glyph_pos_cache = redraw_requested_handler(&mut state, &buffer_ref, &window);
                 },
                 _ => (),
+            },
+            Event::UserEvent(event) => match event {
+                BufferEmittedEvent::Redraw => {
+                    glyph_pos_cache = redraw_requested_handler(&mut state, &buffer_ref, &window);
+                },
             },
             _ => (),
         }).unwrap();
