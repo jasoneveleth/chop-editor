@@ -205,11 +205,12 @@ impl TextBuffer {
 mod tests {
     use super::*;
     fn create_buffer(s: &str, cursors: Vec<Selection>) -> TextBuffer {
+        let start = cursors[0].start;
         TextBuffer {
             file: None, 
             cursors: cursors.into_iter().map(|s| (s.start, s)).collect(), 
             contents: Rope::from(s), 
-            main_cursor_start: 0
+            main_cursor_start: start,
         }
     }
 
@@ -255,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_nowrap_lines() {
-        let cursors = vec![];
+        let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
         let buffer = create_buffer(s, cursors);
         let (a, _) = buffer.nowrap_lines(0, 1);
@@ -270,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_nowrap_lines_snd() {
-        let cursors = vec![];
+        let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
         let buffer = create_buffer(s, cursors);
         let (a, _) = buffer.nowrap_lines(1, 3);
@@ -286,7 +287,7 @@ mod tests {
     #[test]
     fn test_nowrap_lines_end() {
         // no newline ending case
-        let cursors = vec![];
+        let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
         let buffer = create_buffer(s, cursors);
         let (a, _) = buffer.nowrap_lines(5, 6);
@@ -299,7 +300,7 @@ mod tests {
         }
 
         // newline ending case
-        let cursors = vec![];
+        let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh\n";
         let buffer = create_buffer(s, cursors);
         let (b, _) = buffer.nowrap_lines(5, 6);
