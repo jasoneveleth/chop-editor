@@ -173,7 +173,13 @@ impl TextBuffer {
     }
 
     pub fn insert(&self, text: &str) -> Self {
-        let file = self.file.clone();
+        let file = if let Some(fi) = &self.file {
+            let mut file = fi.clone();
+            file.is_modified = true;
+            Some(file)
+        } else {
+            None
+        };
         let mut contents = self.contents.clone();
         let incr = UnicodeSegmentation::graphemes(text, true).count();
         let cursors: OrdMap<_, Selection> = self.cursors_iter().enumerate().map(|(i, s)| {
@@ -333,7 +339,7 @@ fn grapheme_to_byte(graphemes: crop::iter::Graphemes, i: usize) -> usize {
 }
 
 
-pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>, request_redraw: impl Fn()) -> impl FnOnce(&crossbeam::thread::Scope<'_>) {
+pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>, request_redraw: impl Fn(bool)) -> impl FnOnce(&crossbeam::thread::Scope<'_>) {
     move |_| {
         while let Ok(received) = buffer_rx.recv() {
             match received {
@@ -382,7 +388,13 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<Ar
                     }));
                 },
             }
-            request_redraw();
+            let buffer = buffer_ref.load();
+            let dirty = if let Some(fi) = &buffer.file {
+                fi.is_modified
+            } else {
+                false
+            };
+            request_redraw(dirty);
         }
     }
 }

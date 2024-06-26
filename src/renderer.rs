@@ -10,7 +10,7 @@ use winit::event_loop::EventLoop;
 use winit::window::CursorIcon;
 use winit::window::WindowBuilder;
 use winit::keyboard::{Key, NamedKey, ModifiersKeyState};
-use winit::platform::macos::WindowBuilderExtMacOS;
+use winit::platform::macos::{WindowBuilderExtMacOS, WindowExtMacOS};
 use vello::glyph::skrifa::MetadataProvider;
 use vello::kurbo::Affine;
 use vello::peniko;
@@ -116,7 +116,6 @@ impl FontRender {
         let mut pen_x = 0f32;
         let mut pen_y = self.style.ascent;
         let mut line_nr = start_line as usize;
-        println!("start_line: {}, last_line: {}", start_line, last_line);
 
         let off_x = self.style.voffset_x;
         let off_y = start_line*line_height - y_scroll + self.style.voffset_y;
@@ -287,7 +286,17 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
         // INVARIANT: `buffer_ref` SHOULD ONLY EVER BE MODIFIED (`store`d) BY THIS THREAD
         // If this is not upheld, then we have a race condition where the buffer changes
         // between the load, computation, and store, and we miss something
-        s.spawn(buffer_op_handler(buffer_rx, buffer_ref.clone(), || window.request_redraw()));
+        s.spawn(buffer_op_handler(buffer_rx, buffer_ref.clone(), |dirty| {
+            // TODO: unfortunately the buffer thread has to do this because it owns the window since it
+            // needs to request a redraw (and I can't figure out how to make it work otherwise)
+            // ideally the renderer does a buffer.load() and call the set_document_edited()
+            if dirty {
+                (*window).set_document_edited(true);
+            } else {
+                (*window).set_document_edited(false);
+            }
+            window.request_redraw()
+        }));
 
         let mut mods = Modifiers::default();
         let mut glyph_pos_cache = HashMap::new();
@@ -387,7 +396,6 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     }
                 },
                 WindowEvent::RedrawRequested => {
-                    println!("redraw requested");
                     let width = state.surface.config.width;
                     let height = state.surface.config.height;
                     let frame = state.surface.surface.get_current_texture().unwrap();
@@ -411,7 +419,6 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                             }
                         }
                     }
-                    println!("drawing thing");
                     // draw titlebar
                     scene.fill(NonZero, Affine::IDENTITY, font_render.style.bg_color, None, &titlebar);
                     renderer
