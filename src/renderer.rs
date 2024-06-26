@@ -47,7 +47,7 @@ struct Style {
     cursor_color: peniko::Color,
     selection_color: peniko::Color,
     font_size: f32,
-    // vwidth: f32, // viewport width + height
+    vwidth: f32, // viewport width + height
     vheight: f32,
     voffset_x: f32, // viewport offset from top left
     voffset_y: f32,
@@ -127,8 +127,12 @@ impl FontRender {
                 NonZero,
                 graphemes.filter_map(|c| {
                     let c = c.to_string().chars().nth(0).unwrap();
-                    pos_cache.insert(char_ind, ((pen_x, pen_y), (pen_x + off_x, pen_y + off_y)));
                     char_ind += 1;
+                    if c != '\n' && pen_x > self.style.vwidth { // if we're off screen just skip
+                        return None
+                    }
+
+                    pos_cache.insert(char_ind-1, ((pen_x, pen_y), (pen_x + off_x, pen_y + off_y)));
 
                     // we skip \n and \t. Otherwise try looking in the 
                     // font and the fallback font.
@@ -254,7 +258,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
         cursor_color: peniko::Color::rgb8(0x5e, 0x9c, 0xf5),
         selection_color: peniko::Color::rgba8(0x5e, 0x9c, 0xf5, 0x66),
         vheight: size.height as f32 - TITLEBAR_HEIGHT - Y_PADDING,
-        // vwidth: size.width as f32 - X_PADDING,
+        vwidth: size.width as f32 - X_PADDING,
         voffset_x: X_PADDING,
         voffset_y: TITLEBAR_HEIGHT + Y_PADDING,
         tab_width: 10.,

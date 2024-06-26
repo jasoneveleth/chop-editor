@@ -137,7 +137,8 @@ impl TextBuffer {
 
         let mut contents = self.contents.clone();
         for cursor in self.cursors_iter().rev() {
-            let start = grapheme_to_byte(contents.graphemes(), (cursor.start-1).max(0));
+            // we don't want to go under 0 so we max with 1 before subtracting
+            let start = grapheme_to_byte(contents.graphemes(), cursor.start.max(1) - 1);
             let end = grapheme_to_byte(contents.graphemes(), cursor.start);
             contents.delete(start..end);
         }
