@@ -273,7 +273,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
         ascent,
     };
 
-    let font_render = FontRender {
+    let mut font_render = FontRender {
         fallback_font,
         font,
         style,
@@ -309,6 +309,8 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     elwt.exit();
                 },
                 WindowEvent::Resized(size) => {
+                    font_render.style.vheight = size.height as f32 - TITLEBAR_HEIGHT - Y_PADDING;
+                    font_render.style.vwidth = size.width as f32 - X_PADDING;
                     render_cx.resize_surface(&mut state.surface, size.width, size.height);
                     state.window.request_redraw();
                 },
