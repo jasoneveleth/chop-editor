@@ -72,6 +72,7 @@ struct FontRender {
 
 // don't want to write this out
 type GlyphPosCache = HashMap<usize, ((f32, f32), (f32, f32))>;
+type LineCache = Vec<f32>;
 
 // const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/NotoColorEmoji-Regular.ttf");
 // const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/System/Library/Fonts/Apple Color Emoji.ttc");
@@ -83,7 +84,7 @@ const CURSOR_WIDTH: f64 = 4.;
 const CURSOR_HEIGHT: f64 = 35.;
 
 impl FontRender {
-    fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> GlyphPosCache {
+    fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> (GlyphPosCache, LineCache) {
         // main font
         let file_ref = skrifa::raw::FileRef::new(self.font.data.as_ref()).unwrap();
         let font_ref = match file_ref {
@@ -119,6 +120,8 @@ impl FontRender {
         // the cache of the top left corner of each glyph; specifically y=ascent, 
         // so the top of most normal capital letters
         let mut pos_cache = HashMap::new();
+        // the cache of the screen height of each line (the top of the line)
+        let mut line_cache = vec![];
 
         let mut missing = vec![];
 
@@ -126,8 +129,10 @@ impl FontRender {
         let mut pen_y = self.style.ascent;
         let mut line_nr = start_line as usize;
 
+
         let off_x = self.style.voffset_x;
         let off_y = start_line*line_height - y_scroll + self.style.voffset_y;
+        line_cache.push(pen_y + off_y);
         scene
             .draw_glyphs(&self.font)
             .font_size(self.style.font_size)
@@ -154,6 +159,7 @@ impl FontRender {
                     if c == '\n' {
                         line_nr += 1;
                         pen_y += line_height;
+                        line_cache.push(pen_y + off_y);
                         pen_x = 0.;
                         FMTOption::None
                     } else if c == '\t' {
@@ -205,7 +211,7 @@ impl FontRender {
                     }
                 }),
             );
-        pos_cache
+        (pos_cache, line_cache)
     }
 }
 
@@ -227,7 +233,7 @@ fn get_font_metrics(font: &peniko::Font, font_size: f32) -> (f32, f32) {
     (line_height * 2., metrics.ascent)
 }
 
-fn redraw_requested_handler(state: &mut State, buffer_ref: &Arc<ArcSwapAny<Arc<TextBuffer>>>, window: &Window) -> GlyphPosCache {
+fn redraw_requested_handler(state: &mut State, buffer_ref: &Arc<ArcSwapAny<Arc<TextBuffer>>>, window: &Window) -> (GlyphPosCache, LineCache) {
     let renderer = &mut state.renderer;
     let scene = &mut state.scene;
     let font_render = &state.font_render;
@@ -242,7 +248,7 @@ fn redraw_requested_handler(state: &mut State, buffer_ref: &Arc<ArcSwapAny<Arc<T
     } else {
         false
     };
-    let glyph_pos_cache = font_render.render(scene, state.scroll_y, &buf);
+    let (glyph_pos_cache, line_cache) = font_render.render(scene, state.scroll_y, &buf);
     for c in buf.cursors_iter() {
         if let Some(pos) = glyph_pos_cache.get(&c.start) {
             let ((_, _), (x, y)) = *pos;
@@ -283,7 +289,7 @@ fn redraw_requested_handler(state: &mut State, buffer_ref: &Arc<ArcSwapAny<Arc<T
     } else {
         (*window).set_document_edited(false);
     }
-    glyph_pos_cache
+    (glyph_pos_cache, line_cache)
 }
 
 pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
@@ -360,6 +366,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
 
         let mut mods = Modifiers::default();
         let mut glyph_pos_cache = HashMap::new();
+        let mut line_cache = vec![];
         let mut curr_pos = PhysicalPosition {x: 0., y: 0.};
 
         event_loop.run(move |ev, elwt| match ev {
@@ -393,15 +400,34 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                 },
                 WindowEvent::MouseInput { device_id: _, state, button } => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
-                        let mut closest = None;
-                        let mut closest_dist = f32::MAX;
                         let x = curr_pos.x as f32;
                         let y = curr_pos.y as f32;
+
+                        // find closest line
+                        let mut closest_line = None;
+                        let mut closest = f32::MAX;
+                        for y1 in line_cache.iter() {
+                            let middle = y1-ascent/2.;
+                            let dist = (y - middle).abs();
+                            if dist < closest {
+                                closest = dist;
+                                closest_line = Some(y1);
+                            }
+                        }
+                        assert!(closest_line.is_some());
+                        let right_line: f32 = *closest_line.unwrap();
+
+                        // which glyph
+                        let mut closest = None;
+                        let mut closest_dist = f32::MAX;
                         for (i, ((_, _), (x1, y1))) in glyph_pos_cache.iter() {
+                            if *y1 != right_line {
+                                continue;
+                            }
                             let dx = x - x1;
                             let dy = y - (y1-ascent/2.);
-                            // TODO: this is sooo wrong, should only look at glyphs on the line
-                            let dist = dx*dx + 100.*dy*dy; 
+
+                            let dist = dx*dx + dy*dy; 
                             if dist < closest_dist {
                                 closest = Some(i);
                                 closest_dist = dist;
@@ -458,13 +484,17 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     }
                 },
                 WindowEvent::RedrawRequested => {
-                    glyph_pos_cache = redraw_requested_handler(&mut state, &buffer_ref, &window);
+                    let (gpc, lc) = redraw_requested_handler(&mut state, &buffer_ref, &window);
+                    glyph_pos_cache = gpc;
+                    line_cache = lc;
                 },
                 _ => (),
             },
             Event::UserEvent(event) => match event {
                 BufferEmittedEvent::Redraw => {
-                    glyph_pos_cache = redraw_requested_handler(&mut state, &buffer_ref, &window);
+                    let (gpc, lc) = redraw_requested_handler(&mut state, &buffer_ref, &window);
+                    glyph_pos_cache = gpc;
+                    line_cache = lc;
                 },
             },
             _ => (),
