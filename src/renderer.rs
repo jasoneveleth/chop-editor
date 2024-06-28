@@ -25,7 +25,7 @@ use arc_swap::ArcSwapAny;
 use crossbeam::thread;
 use std::sync::mpsc;
 
-use crate::buffer::{TextBuffer, BufferEmittedEvent};
+use crate::buffer::{TextBuffer, CustomEvent};
 use crate::buffer::BufferOp;
 use crate::buffer::buffer_op_handler;
 use crate::filter_map::{FMTOption, filter_map_terminate};
@@ -45,6 +45,7 @@ struct State<'s> {
     renderer: Renderer,
     render_cx: RenderContext,
     scroll_y: f32,
+    should_draw_cursor: bool,
 }
 
 struct Style {
@@ -254,7 +255,9 @@ fn redraw_requested_handler(state: &mut State, buffer_ref: &Arc<ArcSwapAny<Arc<T
             let ((_, _), (x, y)) = *pos;
             // draw cursor
             let pos = (x as f64 - CURSOR_WIDTH/2., (y - font_render.style.ascent/2.) as f64 - CURSOR_HEIGHT/2.);
-            scene.fill(NonZero, Affine::translate(pos), font_render.style.cursor_color, None, &font_render.style.cursor_shape);
+            if state.should_draw_cursor {
+                scene.fill(NonZero, Affine::translate(pos), font_render.style.cursor_color, None, &font_render.style.cursor_shape);
+            }
             if !c.is_empty() {
                 if let Some(pos) = glyph_pos_cache.get(&c.end()) {
                     let ((end_x, end_y), (_, _)) = *pos;
@@ -292,6 +295,13 @@ fn redraw_requested_handler(state: &mut State, buffer_ref: &Arc<ArcSwapAny<Arc<T
     (glyph_pos_cache, line_cache)
 }
 
+fn blink_cursor(event_loop_proxy: winit::event_loop::EventLoopProxy<CustomEvent>) {
+    loop {
+        event_loop_proxy.send_event(CustomEvent::CursorBlink).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
     let size = LogicalSize {width: 800, height: 600};
     let mut render_cx = RenderContext::new().unwrap();
@@ -309,6 +319,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
 
     let event_loop = EventLoopBuilder::with_user_event().build().unwrap();
     let event_loop_proxy = event_loop.create_proxy();
+    let event_loop_proxy2 = event_loop.create_proxy();
     let window = Arc::new(wb.build(&event_loop).unwrap());
     let size = window.inner_size();
 
@@ -354,7 +365,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
         style,
     };
 
-    let mut state = State { surface, window: window.clone(), scene, font_render, renderer, render_cx, scroll_y: 0.};
+    let mut state = State { surface, window: window.clone(), scene, font_render, renderer, render_cx, scroll_y: 0., should_draw_cursor: true};
 
     let (buffer_tx, buffer_rx) = mpsc::channel();
 
@@ -363,6 +374,9 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
         // If this is not upheld, then we have a race condition where the buffer changes
         // between the load, computation, and store, and we miss something
         s.spawn(buffer_op_handler(buffer_rx, buffer_ref.clone(), event_loop_proxy));
+
+        // TODO: there should be a better way than spawning a thread for this
+        s.spawn(move |_| { blink_cursor(event_loop_proxy2); });
 
         let mut mods = Modifiers::default();
         let mut glyph_pos_cache = HashMap::new();
@@ -491,7 +505,13 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                 _ => (),
             },
             Event::UserEvent(event) => match event {
-                BufferEmittedEvent::Redraw => {
+                CustomEvent::BufferRequestedRedraw => {
+                    let (gpc, lc) = redraw_requested_handler(&mut state, &buffer_ref, &window);
+                    glyph_pos_cache = gpc;
+                    line_cache = lc;
+                },
+                CustomEvent::CursorBlink => {
+                    state.should_draw_cursor = !state.should_draw_cursor;
                     let (gpc, lc) = redraw_requested_handler(&mut state, &buffer_ref, &window);
                     glyph_pos_cache = gpc;
                     line_cache = lc;

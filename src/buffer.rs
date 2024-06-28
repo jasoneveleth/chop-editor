@@ -22,8 +22,9 @@ pub enum BufferOp {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-pub enum BufferEmittedEvent {
-    Redraw,
+pub enum CustomEvent {
+    BufferRequestedRedraw,
+    CursorBlink,
 }
 
 // let | be the cursor, and \ be the end of the selection
@@ -345,7 +346,7 @@ fn grapheme_to_byte(graphemes: crop::iter::Graphemes, i: usize) -> usize {
 }
 
 
-pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>, event_loop_proxy: EventLoopProxy<BufferEmittedEvent>) -> impl FnOnce(&crossbeam::thread::Scope<'_>) {
+pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>, event_loop_proxy: EventLoopProxy<CustomEvent>) -> impl FnOnce(&crossbeam::thread::Scope<'_>) {
     move |_| {
         while let Ok(received) = buffer_rx.recv() {
             match received {
@@ -394,7 +395,7 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<Ar
                     }));
                 },
             }
-            if let Err(e) = event_loop_proxy.send_event(BufferEmittedEvent::Redraw) {
+            if let Err(e) = event_loop_proxy.send_event(CustomEvent::BufferRequestedRedraw) {
                 log::error!("failed to send redraw event: {}", e);
             }
         }
