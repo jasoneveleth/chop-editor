@@ -3,3 +3,4 @@ members = [
     "shell",
     "editor"
 ]
+resolver = "2"

@@ -4,5 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Add dependencies like `cocoa`, `objc`, etc. for macOS integration
+chrono = "0.4.38"
 
+[package.metadata.bundle]
+name = "Chop"
+identifier = "com.jasoneveleth.chop"
+icon = ["shell/32x32.png", "shell/128x128.png", "shell/128x128@2x.png"]
+version = "1.0.0"
+copyright = "Copyright © 2024 Jason Eveleth"
+category = "Utility"
+short_description = "Slice and dice your files."

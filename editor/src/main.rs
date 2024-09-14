@@ -5,9 +5,9 @@ use std::env;
 use vello::peniko;
 use arc_swap::ArcSwap;
 
-use chop::renderer::run;
-use chop::renderer::Args;
-use chop::buffer::TextBuffer;
+use chop_editor::renderer::run;
+use chop_editor::renderer::Args;
+use chop_editor::buffer::TextBuffer;
 
 const FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
 
