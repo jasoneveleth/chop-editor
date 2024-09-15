@@ -92,6 +92,14 @@ impl TextBuffer {
         Ok(Self {file: Some(fi), cursors, main_cursor_start: 0, contents})
     }
 
+    pub fn from_blank() -> Result<Self, std::io::Error> {
+        let contents = Rope::from("");
+        let mut cursors = OrdMap::new();
+        let start = 0;
+        cursors.insert(start, Selection{start, offset: 0});
+        Ok(Self {file: None, cursors, main_cursor_start: 0, contents})
+    }
+
     // has to return Self because writing updates the file info 
     // (when they were last in sync and if it's modified)
     pub fn write(&self, filename: &Path) -> Result<Self, std::io::Error> {
