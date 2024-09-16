@@ -8,7 +8,6 @@ use crop::Rope;
 use im::OrdMap;
 
 use arc_swap::ArcSwapAny;
-use unicode_segmentation::UnicodeSegmentation;
 use winit::event_loop::EventLoopProxy;
 use std::sync::mpsc;
 
@@ -17,6 +16,7 @@ pub enum BufferOp {
     Delete,
     Save,
     MoveHorizontal(i64),
+    MoveVertical(i64),
     SetMainCursor(usize),
     AddCursor(usize),
 }
@@ -36,8 +36,7 @@ pub enum CustomEvent {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Selection {
     // `start` is the location of the cursor is in the selection
-    // 0 means before the first character, and n means after the nth character
-    // emojis count as 1
+    // 0 means before the first byte, and n means after the nth character
     pub start: usize,
     // offset to the end of the selection such that `start + offset` is end of selection
     offset: i64,
@@ -57,8 +56,10 @@ pub struct TextBuffer {
     pub file: Option<FileInfo>,
     // !!! this should always be sorted
     pub cursors: OrdMap<usize, Selection>,
-    // this is the index
+    // this is the index (byte offset)
     pub main_cursor_start: usize,
+    // keep track so up/down will maintain rough position
+    grapheme_col_offset: usize,
     contents: Rope,
 }
 
@@ -89,7 +90,7 @@ impl TextBuffer {
         let mut cursors: OrdMap<usize, Selection> = OrdMap::new();
         let start = 0;
         cursors.insert(start, Selection{start, offset: 0});
-        Ok(Self {file: Some(fi), cursors, main_cursor_start: 0, contents})
+        Ok(Self {file: Some(fi), cursors, main_cursor_start: 0, contents, grapheme_col_offset: 0})
     }
 
     pub fn from_blank() -> Result<Self, std::io::Error> {
@@ -97,7 +98,7 @@ impl TextBuffer {
         let mut cursors = OrdMap::new();
         let start = 0;
         cursors.insert(start, Selection{start, offset: 0});
-        Ok(Self {file: None, cursors, main_cursor_start: 0, contents})
+        Ok(Self {file: None, cursors, main_cursor_start: 0, contents, grapheme_col_offset: 0})
     }
 
     // has to return Self because writing updates the file info 
@@ -117,15 +118,11 @@ impl TextBuffer {
         });
         let cursors = self.cursors.clone();
         let contents = self.contents.clone();
-        Ok(Self {file: fi, cursors, main_cursor_start: self.main_cursor_start, contents})
+        Ok(Self {file: fi, cursors, main_cursor_start: self.main_cursor_start, contents, grapheme_col_offset: self.grapheme_col_offset})
     }
 
     pub fn num_lines(&self) -> usize {
         self.contents.lines().count()
-    }
-
-    pub fn num_graphemes(&self) -> usize {
-        return self.contents.graphemes().count();
     }
 
     // lines are 0 indexed
@@ -134,59 +131,111 @@ impl TextBuffer {
         let byte_len = self.contents.byte_of_line(start);
         let byte_len2 = self.contents.byte_of_line(end);
         let gs = self.contents.byte_slice(byte_len..byte_len2).graphemes();
-
-        let grapheme_index = self.contents.byte_slice(..byte_len).graphemes().count();
-        (gs, grapheme_index as usize)
+        (gs, byte_len)
     }
 
+    // move_vertical moves the main cursor vertically by `offset` lines
+    // we use the heuristic the width is about the # of graphemes in the line
+    pub fn move_vertical(&self, offset: i64) -> Self {
+        let file = self.file.clone();
+        let mut cursors = OrdMap::new();
+        let mut main_cursor_start = usize::MAX;
+        for s in self.cursors_iter() {
+            let line = self.contents.line_of_byte(s.start);
+            let other_line = ((line as i64 + offset).max(0) as usize).min(self.contents.line_len());
+            let other_line_start = self.contents.byte_of_line(other_line);
+            let other_line_end = if other_line == self.contents.line_len() {
+                self.contents.byte_len()
+            } else {
+                self.contents.byte_of_line(other_line + 1)
+            };
+
+            let mut start = other_line_start;
+            for _ in 0..self.grapheme_col_offset {
+                if start+1 >= other_line_end {
+                    break;
+                }
+                start += 1;
+                while !self.contents.is_grapheme_boundary(start) {
+                    start += 1;
+                }
+            }
+            cursors.insert(start, Selection{start, offset: 0});
+            if s.start == self.main_cursor_start {
+                main_cursor_start = start;
+            }
+        }
+        let contents = self.contents.clone();
+        assert!(main_cursor_start != usize::MAX);
+        
+        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset: self.grapheme_col_offset}
+    }
+
+    // move_horizontal moves the main cursor horizontally by `offset` graphemes
     pub fn move_horizontal(&self, offset: i64) -> Self {
         let file = self.file.clone();
-        let cursors: OrdMap<_, _> = self.cursors_iter().map(|s| {
-            let start = ((s.start as i64 + offset) as usize).max(0).min(self.num_graphemes()-1);
-            (start, Selection{start, offset: 0 as i64})
-        }).collect();
+        let mut cursors = OrdMap::new();
+        let mut main_cursor_start = usize::MAX;
+        let dir = offset / offset.abs();
+        for s in self.cursors_iter() {
+            let mut start = s.start as i64;
+            for _ in 0..offset.abs() {
+                start = (start + dir).max(0);
+                while !self.contents.is_grapheme_boundary(start as usize) {
+                    start += dir;
+                }
+            }
+            let start = (start.max(0) as usize).min(self.contents.byte_len());
+            if s.start == self.main_cursor_start {
+                main_cursor_start = start;
+            }
+            cursors.insert(start, Selection{start, offset: 0 as i64});
+        }
         let contents = self.contents.clone();
+        assert!(main_cursor_start != usize::MAX);
         
-        let main_cursor_start = ((self.main_cursor_start as i64 + offset) as usize).max(0).min(self.num_graphemes()-1);
-
-        Self {file, cursors, main_cursor_start, contents}
+        let grapheme_col_offset = (self.grapheme_col_offset as i64 + offset) as usize;
+        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset}
     }
 
-    pub fn delete(&self) -> Self {
+    // note: this is a little tricky because it can change the number of cursors.
+    // imagine: abc|d|e  when you backspace you get: ab|e
+    pub fn backdelete_cursor(&self) -> Self {
         let file = self.file.clone();
 
+        let mut deleted_bytes = vec![];
         let mut contents = self.contents.clone();
         for cursor in self.cursors_iter().rev() {
             // we don't want to go under 0 so we max with 1 before subtracting
-            let start = grapheme_to_byte(contents.graphemes(), cursor.start.max(1) - 1);
-            let end = grapheme_to_byte(contents.graphemes(), cursor.start);
+            let mut start = cursor.start.max(1) - 1;
+            while !contents.is_grapheme_boundary(start) {
+                start -= 1;
+            }
+            let end = cursor.start;
             contents.delete(start..end);
+            deleted_bytes.push(end - start);
         }
 
-        let update = if self.cursors[&self.main_cursor_start].offset == 0 {
-            // adding 1 in zero case fixes it
-            |(i, s): (usize, &Selection)| {
-                let start = s.start + (s.start == 0) as usize - (i+1);
-                (start, Selection{start, offset: 0 as i64})
-            }
-        } else {
-            |(_, s): (usize, &Selection)| (s.end(), Selection{start: s.end(), offset: 0 as i64})
-        };
-        let cursors: OrdMap<_, Selection> = self.cursors_iter().enumerate().map(update).collect();
+        // prefix sum (from the back) to get the adjustment
+        for i in (0..(deleted_bytes.len() - 1)).rev() {
+            deleted_bytes[i] += deleted_bytes[i+1];
+        }
 
-        // super awkward to keep the main_cursor in sync
         let mut main_cursor_start = usize::MAX;
-        for (old, new) in self.cursors_iter().zip(cursors.values()) {
-            if old.start == self.main_cursor_start {
-                main_cursor_start = new.start;
-                break;
+        let mut cursors = OrdMap::new();
+        for (i, s) in self.cursors_iter().enumerate() {
+            let start = s.start - deleted_bytes[deleted_bytes.len()-1 - i];
+            cursors.insert(start, Selection{start, offset: 0 as i64});
+            if s.start == self.main_cursor_start {
+                main_cursor_start = start;
             }
         }
         assert!(main_cursor_start != usize::MAX);
-
-        Self {file, cursors, main_cursor_start, contents}
+        let grapheme_col_offset = reset_grapheme_col_offset(&self.contents, main_cursor_start);
+        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset}
     }
 
+    // we're assuming text ends on a grapheme boundary
     pub fn insert(&self, text: &str) -> Self {
         let file = if let Some(fi) = &self.file {
             let mut file = fi.clone();
@@ -195,27 +244,24 @@ impl TextBuffer {
         } else {
             None
         };
-        let mut contents = self.contents.clone();
-        let incr = UnicodeSegmentation::graphemes(text, true).count();
-        let cursors: OrdMap<_, Selection> = self.cursors_iter().enumerate().map(|(i, s)| {
-            let adjusted_start = s.start + incr*i;
-            contents.insert(grapheme_to_byte(contents.graphemes(), adjusted_start), text);
-            let start = adjusted_start + incr;
-            (start, Selection{start, offset: 0})
-        }).collect();
 
-        // super awkward to keep the main_cursor in sync, since there's no easy way to 
-        // know what index the main cursor is.
+        let incr = text.len();
+        let mut contents = self.contents.clone();
         let mut main_cursor_start = usize::MAX;
-        for (old, new) in self.cursors_iter().zip(cursors.values()) {
-            if old.start == self.main_cursor_start {
-                main_cursor_start = new.start;
-                break;
+        let mut cursors = OrdMap::new();
+        for (i, s) in self.cursors_iter().enumerate() {
+            let adjusted_start = s.start + incr*i;
+            contents.insert(adjusted_start, text);
+            let start = adjusted_start + incr;
+            cursors.insert(start, Selection{start, offset: 0});
+            if s.start == self.main_cursor_start {
+                main_cursor_start = start;
             }
         }
         assert!(main_cursor_start != usize::MAX);
 
-        Self {file, cursors, main_cursor_start, contents}
+        let grapheme_col_offset = reset_grapheme_col_offset(&self.contents, main_cursor_start);
+        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset}
     }
 
     pub fn lines(&self) -> crop::iter::Lines {
@@ -227,16 +273,23 @@ impl TextBuffer {
     }
 }
 
+fn reset_grapheme_col_offset(contents: &Rope, start: usize) -> usize {
+    contents.byte_slice(0..start).graphemes().count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     fn create_buffer(s: &str, cursors: Vec<Selection>) -> TextBuffer {
         let start = cursors[0].start;
+        let contents = Rope::from(s);
+        let grapheme_col_offset = reset_grapheme_col_offset(&contents, start);
         TextBuffer {
             file: None, 
             cursors: cursors.into_iter().map(|s| (s.start, s)).collect(), 
-            contents: Rope::from(s), 
+            contents, 
             main_cursor_start: start,
+            grapheme_col_offset,
         }
     }
 
@@ -270,7 +323,7 @@ mod tests {
         let cursors = vec![Selection {start: 1, offset: 0}, Selection {start: 5, offset: 0}, Selection {start: 8, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
         let buffer = create_buffer(s, cursors);
-        let buffer = buffer.delete();
+        let buffer = buffer.backdelete_cursor();
 
         let yee = buffer.contents.chunks().collect::<String>();
 
@@ -349,18 +402,13 @@ mod tests {
     }
 }
 
-fn grapheme_to_byte(graphemes: crop::iter::Graphemes, i: usize) -> usize {
-    graphemes.take(i).map(|g| g.len()).sum()
-}
-
-
 pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>, event_loop_proxy: EventLoopProxy<CustomEvent>) -> impl FnOnce(&crossbeam::thread::Scope<'_>) {
     move |_| {
         while let Ok(received) = buffer_rx.recv() {
             match received {
                 BufferOp::Delete => {
                     let buffer = buffer_ref.load();
-                    buffer_ref.store(Arc::new(buffer.delete()));
+                    buffer_ref.store(Arc::new(buffer.backdelete_cursor()));
                 },
                 BufferOp::Insert(s) => {
                     let buffer = buffer_ref.load();
@@ -369,6 +417,10 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<Ar
                 BufferOp::MoveHorizontal(n) => {
                     let buffer = buffer_ref.load();
                     buffer_ref.store(Arc::new(buffer.move_horizontal(n)));
+                },
+                BufferOp::MoveVertical(n) => {
+                    let buffer = buffer_ref.load();
+                    buffer_ref.store(Arc::new(buffer.move_vertical(n)));
                 },
                 BufferOp::Save => {
                     let buffer = buffer_ref.load();
@@ -389,6 +441,7 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<Ar
                         contents: buffer.contents.clone(),
                         file: buffer.file.clone(),
                         cursors,
+                        grapheme_col_offset: buffer.grapheme_col_offset,
                     }));
                 },
                 BufferOp::AddCursor(start) => {
@@ -400,6 +453,7 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<Ar
                         contents: buffer.contents.clone(),
                         file: buffer.file.clone(),
                         cursors,
+                        grapheme_col_offset: buffer.grapheme_col_offset,
                     }));
                 },
             }

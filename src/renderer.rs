@@ -116,7 +116,7 @@ impl FontRender {
         let start_line = (y_scroll/line_height).floor().max(0.);
         // (line_nr)*(total_line_height) - y_offset > winow.height means line starts below bottom of screen
         let last_line = ((self.style.vheight as f32 + y_scroll)/line_height).ceil().min((buffer.num_lines()) as f32);
-        let (graphemes, start_index) = buffer.nowrap_lines(start_line as usize, last_line as usize);
+        let (graphemes, mut index) = buffer.nowrap_lines(start_line as usize, last_line as usize);
 
         // the cache of the top left corner of each glyph; specifically y=ascent, 
         // so the top of most normal capital letters
@@ -142,7 +142,8 @@ impl FontRender {
             .glyph_transform(None)
             .draw(
                 NonZero,
-                filter_map_terminate(graphemes.enumerate(), |(i, c)| {
+                filter_map_terminate(graphemes, |c| {
+                    let probably_one = c.len();
                     let c = c.to_string().chars().nth(0).unwrap();
                     if c != '\n' && pen_x > self.style.vwidth { // if we're off screen just skip
                         return if line_nr >= (last_line as usize) - 1 {
@@ -153,7 +154,8 @@ impl FontRender {
                         };
                     }
 
-                    pos_cache.insert(i + start_index, ((pen_x, pen_y), (pen_x + off_x, pen_y + off_y)));
+                    pos_cache.insert(index, ((pen_x, pen_y), (pen_x + off_x, pen_y + off_y)));
+                    index += probably_one;
 
                     // we skip \n and \t. Otherwise try looking in the 
                     // font and the fallback font.
@@ -488,6 +490,8 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                                     NamedKey::Enter => buffer_tx.send(BufferOp::Insert(String::from("\n"))).unwrap(),
                                     NamedKey::ArrowLeft => buffer_tx.send(BufferOp::MoveHorizontal(-1)).unwrap(),
                                     NamedKey::ArrowRight => buffer_tx.send(BufferOp::MoveHorizontal(1)).unwrap(),
+                                    NamedKey::ArrowUp => buffer_tx.send(BufferOp::MoveVertical(-1)).unwrap(),
+                                    NamedKey::ArrowDown => buffer_tx.send(BufferOp::MoveVertical(1)).unwrap(),
                                     NamedKey::Space => buffer_tx.send(BufferOp::Insert(String::from(" "))).unwrap(),
                                     NamedKey::Backspace => buffer_tx.send(BufferOp::Delete).unwrap(),
                                     _ => (),
