@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -21,21 +22,21 @@ use vello::kurbo::Rect;
 use winit::window::Window;
 use pollster::FutureExt as _;
 
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
+use objc2_app_kit::{NSApplication, NSApplicationDelegate};
+use objc2_foundation::{NSArray, NSString, NSURL, MainThreadMarker, NSObject, NSObjectProtocol};
+
 use arc_swap::ArcSwapAny;
 use crossbeam::thread;
 use std::sync::mpsc;
 
+use crate::app::Args;
 use crate::buffer::{TextBuffer, CustomEvent};
 use crate::buffer::BufferOp;
 use crate::buffer::buffer_op_handler;
 use crate::filter_map::{FMTOption, filter_map_terminate};
-
-pub struct Args {
-    pub font_size: f32, 
-    pub bg_color: peniko::Color, 
-    pub fg_color: peniko::Color,
-    pub font_data: &'static [u8],
-}
 
 struct State<'s> {
     surface: RenderSurface<'s>,
@@ -64,6 +65,56 @@ struct Style {
     cursor_shape: Rect,
     titlebar: Rect,
 }
+
+fn extract_urls_from_array(array: &NSArray<NSURL>) -> Vec<String> {
+    let mut urls = Vec::new();
+
+    for i in 0..array.len() {
+        let url: objc2::rc::Id<NSURL> = unsafe { array.objectAtIndex(i) };
+
+        // Convert NSURL to NSString
+        let ns_string: objc2::rc::Id<NSString> = unsafe { url.absoluteString().unwrap() };
+
+        // Convert NSString to Rust String
+        let rust_string = unsafe {
+            let c_str: *const std::os::raw::c_char = ns_string.UTF8String();
+            CStr::from_ptr(c_str).to_string_lossy().into_owned()
+        };
+
+        urls.push(rust_string);
+    }
+    urls
+}
+
+declare_class!(
+    struct AppDelegate;
+
+    unsafe impl ClassType for AppDelegate {
+        type Super = NSObject;
+        type Mutability = mutability::MainThreadOnly;
+        const NAME: &'static str = "MyAppDelegate";
+    }
+
+    impl DeclaredClass for AppDelegate {}
+
+    unsafe impl NSObjectProtocol for AppDelegate {}
+
+    unsafe impl NSApplicationDelegate for AppDelegate {
+        #[method(application:openURLs:)]
+        #[allow(non_snake_case)]
+        fn application_openURLs(&self, application: &NSApplication, urls: &NSArray<NSURL>) {
+            let urls = extract_urls_from_array(urls);
+            log::warn!("open urls: {application:?}, {urls:?}");
+        }
+    }
+);
+
+impl AppDelegate {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        unsafe { msg_send_id![super(mtm.alloc().set_ivars(())), init] }
+    }
+}
+
 
 struct FontRender {
     font: peniko::Font,
@@ -299,12 +350,14 @@ fn redraw_requested_handler(state: &mut State, buffer_ref: &Arc<ArcSwapAny<Arc<T
 
 fn blink_cursor(event_loop_proxy: winit::event_loop::EventLoopProxy<CustomEvent>) {
     loop {
-        event_loop_proxy.send_event(CustomEvent::CursorBlink).unwrap();
+        if event_loop_proxy.send_event(CustomEvent::CursorBlink).is_err() {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 }
 
-pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
+pub fn run(args: &Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
     let size = LogicalSize {width: 800, height: 600};
     let mut render_cx = RenderContext::new().unwrap();
 
@@ -368,6 +421,14 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
     };
 
     let mut state = State { surface, window: window.clone(), scene, font_render, renderer, render_cx, scroll_y: 0., should_draw_cursor: true};
+
+    // =================================== weird objc stuff
+    let mtm = MainThreadMarker::new().unwrap();
+    let delegate = AppDelegate::new(mtm);
+    // Important: Call `sharedApplication` after `EventLoop::new`, doing it before is not yet supported.
+    let app = NSApplication::sharedApplication(mtm);
+    app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    // ===================================
 
     let (buffer_tx, buffer_rx) = mpsc::channel();
 
@@ -472,6 +533,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     curr_pos = position;
                 },
                 WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
+                    log::info!("keyboard input: {:?} {:?}", event.logical_key, event.state);
                     if event.state != ElementState::Released {
                         match event.logical_key {
                             Key::Character(s) => {
@@ -502,6 +564,7 @@ pub fn run(args: Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
                     }
                 },
                 WindowEvent::RedrawRequested => {
+                    log::info!("redraw requested");
                     let (gpc, lc) = redraw_requested_handler(&mut state, &buffer_ref, &window);
                     glyph_pos_cache = gpc;
                     line_cache = lc;

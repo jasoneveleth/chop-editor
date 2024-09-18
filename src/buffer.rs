@@ -94,7 +94,7 @@ impl TextBuffer {
     }
 
     pub fn from_blank() -> Result<Self, std::io::Error> {
-        let contents = Rope::from("");
+        let contents = Rope::from("abcdefgh\nijklmnop\nqrstuvwx\nyz");
         let mut cursors = OrdMap::new();
         let start = 0;
         cursors.insert(start, Selection{start, offset: 0});
