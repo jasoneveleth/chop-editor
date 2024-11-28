@@ -4,8 +4,14 @@ use std::io::Write;
 use chrono;
 use log::LevelFilter;
 use env_logger::Builder;
+use winit::event_loop::EventLoop;
+use objc2::runtime::ProtocolObject;
+use objc2_app_kit::NSApplication;
+use objc2_foundation::MainThreadMarker;
 
 use chop::app::App;
+use chop::buffer::CustomEvent;
+use chop::app::AppDelegate;
 
 fn init_logging(log_file: Option<&str>) {
     if let None = log_file {
@@ -42,6 +48,16 @@ fn main() {
         Some(args[1].clone())
     };
 
-    let app = App::new(filename);
-    app.run();
+    let event_loop = EventLoop::<CustomEvent>::with_user_event().build().unwrap();
+
+    // =================================== weird objc stuff
+    let mtm = MainThreadMarker::new().unwrap();
+    let delegate = AppDelegate::new(mtm);
+    // Important: Call `sharedApplication` after `EventLoop::new`, doing it before is not yet supported.
+    let ns_app = NSApplication::sharedApplication(mtm);
+    ns_app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    // ===================================
+
+    let mut app = App::new(filename, event_loop.create_proxy());
+    event_loop.run_app(&mut app).unwrap();
 }

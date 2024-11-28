@@ -1,139 +1,55 @@
 use std::collections::HashMap;
-use std::ffi::CStr;
-use std::num::NonZeroUsize;
-use std::sync::Arc;
 
 use vello::peniko::Fill::NonZero;
-use winit::dpi::{LogicalSize, PhysicalPosition};
-use winit::event::{WindowEvent, Modifiers};
-use winit::event::{Event, MouseScrollDelta, ElementState, MouseButton};
-use winit::event_loop::EventLoopBuilder;
-use winit::window::CursorIcon;
-use winit::window::WindowBuilder;
-use winit::keyboard::{Key, NamedKey, ModifiersKeyState};
-use winit::platform::macos::{WindowBuilderExtMacOS, WindowExtMacOS};
-use vello::glyph::skrifa::MetadataProvider;
+use winit::platform::macos::WindowExtMacOS;
+// use vello::glyph::skrifa::MetadataProvider;
+use skrifa::MetadataProvider;
 use vello::kurbo::Affine;
 use vello::peniko;
 use vello::skrifa;
-use vello::util::RenderSurface;
-use vello::{util::RenderContext, Renderer, RendererOptions, Scene};
 use vello::kurbo::Rect;
-use winit::window::Window;
-use pollster::FutureExt as _;
+use vello::Scene;
 
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
-use objc2_app_kit::{NSApplication, NSApplicationDelegate};
-use objc2_foundation::{NSArray, NSString, NSURL, MainThreadMarker, NSObject, NSObjectProtocol};
-
-use arc_swap::ArcSwapAny;
-use crossbeam::thread;
-use std::sync::mpsc;
-
-use crate::app::Args;
 use crate::buffer::{TextBuffer, CustomEvent};
-use crate::buffer::BufferOp;
-use crate::buffer::buffer_op_handler;
 use crate::filter_map::{FMTOption, filter_map_terminate};
+use crate::app::WindowState;
 
-struct State<'s> {
-    surface: RenderSurface<'s>,
-    window: Arc<Window>,
-    font_render: FontRender,
-    scene: Scene,
-    renderer: Renderer,
-    render_cx: RenderContext,
-    scroll_y: f32,
-    should_draw_cursor: bool,
-}
-
-struct Style {
-    bg_color: peniko::Color,
-    fg_color: peniko::Color,
-    cursor_color: peniko::Color,
-    selection_color: peniko::Color,
-    font_size: f32,
-    vwidth: f32, // viewport width + height
-    vheight: f32,
-    voffset_x: f32, // viewport offset from top left
-    voffset_y: f32,
-    line_height: f32,
-    tab_width: f32,
-    ascent: f32,
-    cursor_shape: Rect,
-    titlebar: Rect,
-}
-
-fn extract_urls_from_array(array: &NSArray<NSURL>) -> Vec<String> {
-    let mut urls = Vec::new();
-
-    for i in 0..array.len() {
-        let url: objc2::rc::Id<NSURL> = unsafe { array.objectAtIndex(i) };
-
-        // Convert NSURL to NSString
-        let ns_string: objc2::rc::Id<NSString> = unsafe { url.absoluteString().unwrap() };
-
-        // Convert NSString to Rust String
-        let rust_string = unsafe {
-            let c_str: *const std::os::raw::c_char = ns_string.UTF8String();
-            CStr::from_ptr(c_str).to_string_lossy().into_owned()
-        };
-
-        urls.push(rust_string);
-    }
-    urls
-}
-
-declare_class!(
-    struct AppDelegate;
-
-    unsafe impl ClassType for AppDelegate {
-        type Super = NSObject;
-        type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "MyAppDelegate";
-    }
-
-    impl DeclaredClass for AppDelegate {}
-
-    unsafe impl NSObjectProtocol for AppDelegate {}
-
-    unsafe impl NSApplicationDelegate for AppDelegate {
-        #[method(application:openURLs:)]
-        #[allow(non_snake_case)]
-        fn application_openURLs(&self, application: &NSApplication, urls: &NSArray<NSURL>) {
-            let urls = extract_urls_from_array(urls);
-            log::warn!("open urls: {application:?}, {urls:?}");
-        }
-    }
-);
-
-impl AppDelegate {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        unsafe { msg_send_id![super(mtm.alloc().set_ivars(())), init] }
-    }
+pub struct Style {
+    pub bg_color: peniko::Color,
+    pub fg_color: peniko::Color,
+    pub cursor_color: peniko::Color,
+    pub selection_color: peniko::Color,
+    pub font_size: f32,
+    pub vwidth: f32, // viewport width + height
+    pub vheight: f32,
+    pub voffset_x: f32, // viewport offset from top left
+    pub voffset_y: f32,
+    pub line_height: f32,
+    pub tab_width: f32,
+    pub ascent: f32,
+    pub cursor_shape: Rect,
+    pub titlebar: Rect,
 }
 
 
-struct FontRender {
-    font: peniko::Font,
-    fallback_font: peniko::Font,
-    style: Style,
+pub struct FontRender {
+    pub font: peniko::Font,
+    pub fallback_font: peniko::Font,
+    pub style: Style,
 }
 
 // don't want to write this out
-type GlyphPosCache = HashMap<usize, ((f32, f32), (f32, f32))>;
-type LineCache = Vec<f32>;
+pub type GlyphPosCache = HashMap<usize, ((f32, f32), (f32, f32))>;
+pub type LineCache = Vec<f32>;
 
 // const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/NotoColorEmoji-Regular.ttf");
 // const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/System/Library/Fonts/Apple Color Emoji.ttc");
-const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/NotoEmoji-VariableFont_wght.ttf");
-const TITLEBAR_HEIGHT: f32 = 56.;
-const Y_PADDING: f32 = 0.0;
-const X_PADDING: f32 = 20.0;
-const CURSOR_WIDTH: f64 = 4.;
-const CURSOR_HEIGHT: f64 = 35.;
+pub const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/NotoEmoji-VariableFont_wght.ttf");
+pub const TITLEBAR_HEIGHT: f32 = 56.;
+pub const Y_PADDING: f32 = 0.0;
+pub const X_PADDING: f32 = 20.0;
+pub const CURSOR_WIDTH: f64 = 4.;
+pub const CURSOR_HEIGHT: f64 = 35.;
 
 impl FontRender {
     fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> (GlyphPosCache, LineCache) {
@@ -225,8 +141,8 @@ impl FontRender {
                         if let Some(gid) = charmap.map(c) {
                             // if we find it in the normal font
                             pen_x += glyph_metrics.advance_width(gid).unwrap_or_default();
-                            FMTOption::Some(vello::glyph::Glyph {
-                                id: gid.to_u16() as u32,
+                            FMTOption::Some(vello::Glyph {
+                                id: gid.to_u32(),
                                 x,
                                 y,
                             })
@@ -239,8 +155,8 @@ impl FontRender {
                             // if we don't find it, use the placeholder of the normal font.
                             let gid = skrifa::GlyphId::default();
                             pen_x += glyph_metrics.advance_width(gid).unwrap_or_default();
-                            FMTOption::Some(vello::glyph::Glyph {
-                                id: gid.to_u16() as u32,
+                            FMTOption::Some(vello::Glyph {
+                                id: gid.to_u32(),
                                 x,
                                 y,
                             })
@@ -258,8 +174,8 @@ impl FontRender {
             .draw(
                 NonZero,
                 missing.into_iter().map(|(gid, (x, y))| {
-                    vello::glyph::Glyph {
-                        id: gid.to_u16() as u32,
+                    vello::Glyph {
+                        id: gid.to_u32(),
                         x,
                         y,
                     }
@@ -269,11 +185,7 @@ impl FontRender {
     }
 }
 
-fn super_pressed(m: &Modifiers) -> bool {
-    m.lsuper_state() == ModifiersKeyState::Pressed || m.rsuper_state() == ModifiersKeyState::Pressed
-}
-
-fn get_font_metrics(font: &peniko::Font, font_size: f32) -> (f32, f32) {
+pub fn get_font_metrics(font: &peniko::Font, font_size: f32) -> (f32, f32) {
     let file_ref = skrifa::raw::FileRef::new(font.data.as_ref()).unwrap();
     let font_ref = match file_ref {
         skrifa::raw::FileRef::Font(f) => Some(f),
@@ -287,7 +199,7 @@ fn get_font_metrics(font: &peniko::Font, font_size: f32) -> (f32, f32) {
     (line_height * 2., metrics.ascent)
 }
 
-fn redraw_requested_handler(state: &mut State, buffer_ref: &Arc<ArcSwapAny<Arc<TextBuffer>>>, window: &Window) -> (GlyphPosCache, LineCache) {
+pub fn redraw_requested_handler(state: &mut WindowState, buf: &TextBuffer) -> (GlyphPosCache, LineCache) {
     let renderer = &mut state.renderer;
     let scene = &mut state.scene;
     let font_render = &state.font_render;
@@ -296,7 +208,6 @@ fn redraw_requested_handler(state: &mut State, buffer_ref: &Arc<ArcSwapAny<Arc<T
     let frame = state.surface.surface.get_current_texture().unwrap();
 
     scene.reset();
-    let buf = buffer_ref.load();
     let dirty = if let Some(fi) = &buf.file {
         fi.is_modified
     } else {
@@ -341,14 +252,14 @@ fn redraw_requested_handler(state: &mut State, buffer_ref: &Arc<ArcSwapAny<Arc<T
     frame.present();
 
     if dirty {
-        (*window).set_document_edited(true);
+        state.window.set_document_edited(true);
     } else {
-        (*window).set_document_edited(false);
+        state.window.set_document_edited(false);
     }
     (glyph_pos_cache, line_cache)
 }
 
-fn blink_cursor(event_loop_proxy: winit::event_loop::EventLoopProxy<CustomEvent>) {
+pub fn blink_cursor(event_loop_proxy: winit::event_loop::EventLoopProxy<CustomEvent>) {
     loop {
         if event_loop_proxy.send_event(CustomEvent::CursorBlink).is_err() {
             break;
@@ -357,235 +268,4 @@ fn blink_cursor(event_loop_proxy: winit::event_loop::EventLoopProxy<CustomEvent>
     }
 }
 
-pub fn run(args: &Args, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>) {
-    let size = LogicalSize {width: 800, height: 600};
-    let mut render_cx = RenderContext::new().unwrap();
-
-    let wb = WindowBuilder::new()
-        .with_inner_size(size)
-        .with_transparent(true)
-        .with_titlebar_transparent(true)
-        .with_fullsize_content_view(true)
-        .with_title_hidden(true);
-
-    let font = peniko::Font::new(peniko::Blob::new(Arc::new(args.font_data)), 0);
-    let fallback_font = peniko::Font::new(peniko::Blob::new(Arc::new(FALLBACK_FONT_DATA)), 0);
-    let (line_height, ascent) = get_font_metrics(&font, args.font_size);
-
-    let event_loop = EventLoopBuilder::with_user_event().build().unwrap();
-    let event_loop_proxy = event_loop.create_proxy();
-    let event_loop_proxy2 = event_loop.create_proxy();
-    let window = Arc::new(wb.build(&event_loop).unwrap());
-    let size = window.inner_size();
-
-    let surface = render_cx.create_surface(window.clone(), size.width, size.height, Default::default()).block_on().unwrap();
-    let device = &render_cx.devices[0].device;
-
-    let use_cpu = false;
-    let scene = Scene::new();
-    let titlebar = Rect::new(0., 0., size.width as f64, TITLEBAR_HEIGHT as f64);
-    let cursor_shape = Rect::new(0., 0., CURSOR_WIDTH, CURSOR_HEIGHT);
-    let numthr = NonZeroUsize::new(1);
-    let renderer = Renderer::new(
-        &device,
-        RendererOptions {
-            surface_format: Some(surface.format),
-            use_cpu,
-            antialiasing_support: vello::AaSupport::all(),
-            num_init_threads: numthr,
-        },
-    )
-        .unwrap();
-
-    let style = Style { 
-        font_size: args.font_size,
-        fg_color: args.fg_color,
-        bg_color: args.bg_color,
-        cursor_color: peniko::Color::rgb8(0x5e, 0x9c, 0xf5),
-        selection_color: peniko::Color::rgba8(0x5e, 0x9c, 0xf5, 0x66),
-        vheight: size.height as f32 - TITLEBAR_HEIGHT - Y_PADDING,
-        vwidth: size.width as f32 - X_PADDING,
-        voffset_x: X_PADDING,
-        voffset_y: TITLEBAR_HEIGHT + Y_PADDING,
-        tab_width: 10.,
-        line_height,
-        ascent,
-        cursor_shape,
-        titlebar,
-    };
-
-    let font_render = FontRender {
-        fallback_font,
-        font,
-        style,
-    };
-
-    let mut state = State { surface, window: window.clone(), scene, font_render, renderer, render_cx, scroll_y: 0., should_draw_cursor: true};
-
-    // =================================== weird objc stuff
-    let mtm = MainThreadMarker::new().unwrap();
-    let delegate = AppDelegate::new(mtm);
-    // Important: Call `sharedApplication` after `EventLoop::new`, doing it before is not yet supported.
-    let app = NSApplication::sharedApplication(mtm);
-    app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    // ===================================
-
-    let (buffer_tx, buffer_rx) = mpsc::channel();
-
-    thread::scope(move |s| {
-        // INVARIANT: `buffer_ref` SHOULD ONLY EVER BE MODIFIED (`store`d) BY THIS THREAD
-        // If this is not upheld, then we have a race condition where the buffer changes
-        // between the load, computation, and store, and we miss something
-        s.spawn(buffer_op_handler(buffer_rx, buffer_ref.clone(), event_loop_proxy));
-
-        // TODO: there should be a better way than spawning a thread for this
-        s.spawn(move |_| { blink_cursor(event_loop_proxy2); });
-
-        let mut mods = Modifiers::default();
-        let mut glyph_pos_cache = HashMap::new();
-        let mut line_cache = vec![];
-        let mut curr_pos = PhysicalPosition {x: 0., y: 0.};
-
-        event_loop.run(move |ev, elwt| match ev {
-            // maybe should check that window_id of WindowEvent matches the state.window.id()
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => {
-                    elwt.exit();
-                },
-                WindowEvent::Resized(size) => {
-                    state.font_render.style.vheight = size.height as f32 - TITLEBAR_HEIGHT - Y_PADDING;
-                    state.font_render.style.vwidth = size.width as f32 - X_PADDING;
-                    state.render_cx.resize_surface(&mut state.surface, size.width, size.height);
-                    state.window.request_redraw();
-                },
-                WindowEvent::MouseWheel{delta, ..} => {
-                    match delta {
-                        MouseScrollDelta::LineDelta(_, y) => {
-                            // Adjust the scroll position based on the scroll delta
-                            state.scroll_y -= y * 20.0; // Adjust the scroll speed as needed
-                            log::warn!("we don't expect a linedelta from mouse scroll on macOS, ignoring");
-                        },
-                        MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
-                            state.scroll_y -= y as f32;
-                            let real_buffer = buffer_ref.load();
-                            // we want to scroll past the top (ie. negative)
-                            let end = (real_buffer.num_lines()-1) as f32 * line_height;
-                            state.scroll_y = state.scroll_y.max(0.).min(end);
-                            state.window.request_redraw();
-                        },
-                    }
-                },
-                WindowEvent::MouseInput { device_id: _, state, button } => {
-                    if state == ElementState::Pressed && button == MouseButton::Left {
-                        let x = curr_pos.x as f32;
-                        let y = curr_pos.y as f32;
-
-                        // find closest line
-                        let mut closest_line = None;
-                        let mut closest = f32::MAX;
-                        for y1 in line_cache.iter() {
-                            let middle = y1-ascent/2.;
-                            let dist = (y - middle).abs();
-                            if dist < closest {
-                                closest = dist;
-                                closest_line = Some(y1);
-                            }
-                        }
-                        assert!(closest_line.is_some());
-                        let right_line: f32 = *closest_line.unwrap();
-
-                        // which glyph
-                        let mut closest = None;
-                        let mut closest_dist = f32::MAX;
-                        for (i, ((_, _), (x1, y1))) in glyph_pos_cache.iter() {
-                            if *y1 != right_line {
-                                continue;
-                            }
-                            let dx = x - x1;
-                            let dy = y - (y1-ascent/2.);
-
-                            let dist = dx*dx + dy*dy; 
-                            if dist < closest_dist {
-                                closest = Some(i);
-                                closest_dist = dist;
-                            }
-                        }
-                        if let Some(i) = closest {
-                            if mods.lalt_state() == ModifiersKeyState::Pressed || mods.ralt_state() == ModifiersKeyState::Pressed {
-                                buffer_tx.send(BufferOp::AddCursor(*i)).unwrap();
-                            } else {
-                                buffer_tx.send(BufferOp::SetMainCursor(*i)).unwrap();
-                            }
-                        }
-                    } else {
-                        log::info!("mouse input: {state:?}, {button:?}");
-                    }
-                },
-                WindowEvent::ModifiersChanged(state) => {
-                    mods = state
-                },
-                WindowEvent::CursorMoved { device_id: _, position } => {
-                    if position.y <= state.font_render.style.voffset_y as f64 {
-                        state.window.set_cursor_icon(CursorIcon::Default);
-                    } else {
-                        state.window.set_cursor_icon(CursorIcon::Text);
-                    }
-                    curr_pos = position;
-                },
-                WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
-                    log::info!("keyboard input: {:?} {:?}", event.logical_key, event.state);
-                    if event.state != ElementState::Released {
-                        match event.logical_key {
-                            Key::Character(s) => {
-                                // EMOJI
-                                let char = s.chars().nth(0).unwrap();
-                                if char == 'w' && super_pressed(&mods) {
-                                    elwt.exit();
-                                } else if char == 's' && super_pressed(&mods) {
-                                    buffer_tx.send(BufferOp::Save).unwrap();
-                                } else {
-                                    buffer_tx.send(BufferOp::Insert(String::from(s.as_str()))).unwrap();
-                                }
-                            },
-                            Key::Named(n) => {
-                                match n {
-                                    NamedKey::Enter => buffer_tx.send(BufferOp::Insert(String::from("\n"))).unwrap(),
-                                    NamedKey::ArrowLeft => buffer_tx.send(BufferOp::MoveHorizontal(-1)).unwrap(),
-                                    NamedKey::ArrowRight => buffer_tx.send(BufferOp::MoveHorizontal(1)).unwrap(),
-                                    NamedKey::ArrowUp => buffer_tx.send(BufferOp::MoveVertical(-1)).unwrap(),
-                                    NamedKey::ArrowDown => buffer_tx.send(BufferOp::MoveVertical(1)).unwrap(),
-                                    NamedKey::Space => buffer_tx.send(BufferOp::Insert(String::from(" "))).unwrap(),
-                                    NamedKey::Backspace => buffer_tx.send(BufferOp::Delete).unwrap(),
-                                    _ => (),
-                                }
-                            }
-                            a => {log::info!("unknown keyboard input: {a:?}");},
-                        }
-                    }
-                },
-                WindowEvent::RedrawRequested => {
-                    log::info!("redraw requested");
-                    let (gpc, lc) = redraw_requested_handler(&mut state, &buffer_ref, &window);
-                    glyph_pos_cache = gpc;
-                    line_cache = lc;
-                },
-                _ => (),
-            },
-            Event::UserEvent(event) => match event {
-                CustomEvent::BufferRequestedRedraw => {
-                    let (gpc, lc) = redraw_requested_handler(&mut state, &buffer_ref, &window);
-                    glyph_pos_cache = gpc;
-                    line_cache = lc;
-                },
-                CustomEvent::CursorBlink => {
-                    state.should_draw_cursor = !state.should_draw_cursor;
-                    let (gpc, lc) = redraw_requested_handler(&mut state, &buffer_ref, &window);
-                    glyph_pos_cache = gpc;
-                    line_cache = lc;
-                },
-            },
-            _ => (),
-        }).unwrap();
-    }).unwrap();
-}
 

@@ -7,18 +7,20 @@ use std::io::Write;
 use crop::Rope;
 use im::OrdMap;
 
-use arc_swap::ArcSwapAny;
+use arc_swap::ArcSwap;
 use winit::event_loop::EventLoopProxy;
 use std::sync::mpsc;
 
+type BufferId = usize;
+
 pub enum BufferOp {
-    Insert(String),
-    Delete,
-    Save,
-    MoveHorizontal(i64),
-    MoveVertical(i64),
-    SetMainCursor(usize),
-    AddCursor(usize),
+    Insert(BufferId, String),
+    Delete(BufferId),
+    Save(BufferId),
+    MoveHorizontal(BufferId, i64),
+    MoveVertical(BufferId, i64),
+    SetMainCursor(BufferId, usize),
+    AddCursor(BufferId, usize),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -52,6 +54,7 @@ pub struct FileInfo {
     pub file_time: SystemTime,
 }
 
+#[derive(Debug, Clone)]
 pub struct TextBuffer {
     pub file: Option<FileInfo>,
     // !!! this should always be sorted
@@ -59,8 +62,8 @@ pub struct TextBuffer {
     // this is the index (byte offset)
     pub main_cursor_start: usize,
     // keep track so up/down will maintain rough position
-    grapheme_col_offset: usize,
-    contents: Rope,
+    pub grapheme_col_offset: usize,
+    pub contents: Rope,
 }
 
 impl Selection {
@@ -77,7 +80,35 @@ impl Selection {
     }
 }
 
+impl Default for TextBuffer {
+    fn default() -> Self {
+        Self {
+            file: None,
+            cursors: OrdMap::new(),
+            main_cursor_start: 0,
+            grapheme_col_offset: 0,
+            contents: Rope::from(""),
+        }
+    }
+}
+
 impl TextBuffer {
+    pub fn new(
+        file: Option<FileInfo>,
+        cursors: OrdMap<usize, Selection>,
+        main_cursor_start: usize,
+        grapheme_col_offset: usize,
+        contents: Rope,
+        ) -> Self { 
+            Self { 
+                file,
+                cursors,
+                main_cursor_start,
+                grapheme_col_offset,
+                contents,
+            }
+    }
+
     pub fn from_filename(filename_str: &str) -> Result<Self, std::io::Error> {
         let filename: Arc<Path> = Arc::from(Path::new(filename_str));
         let size = filename.metadata()?.len();
@@ -90,15 +121,15 @@ impl TextBuffer {
         let mut cursors: OrdMap<usize, Selection> = OrdMap::new();
         let start = 0;
         cursors.insert(start, Selection{start, offset: 0});
-        Ok(Self {file: Some(fi), cursors, main_cursor_start: 0, contents, grapheme_col_offset: 0})
+        Ok(Self {file: Some(fi), cursors, main_cursor_start: 0, contents, grapheme_col_offset: 0, ..Default::default()})
     }
 
-    pub fn from_blank() -> Result<Self, std::io::Error> {
+    pub fn from_blank() -> Self {
         let contents = Rope::from("abcdefgh\nijklmnop\nqrstuvwx\nyz");
         let mut cursors = OrdMap::new();
         let start = 0;
         cursors.insert(start, Selection{start, offset: 0});
-        Ok(Self {file: None, cursors, main_cursor_start: 0, contents, grapheme_col_offset: 0})
+        Self {file: None, cursors, main_cursor_start: 0, contents, grapheme_col_offset: 0, ..Default::default()}
     }
 
     // has to return Self because writing updates the file info 
@@ -118,7 +149,12 @@ impl TextBuffer {
         });
         let cursors = self.cursors.clone();
         let contents = self.contents.clone();
-        Ok(Self {file: fi, cursors, main_cursor_start: self.main_cursor_start, contents, grapheme_col_offset: self.grapheme_col_offset})
+        Ok(Self {
+            file: fi,
+            cursors,
+            contents,
+            ..*self
+        })
     }
 
     pub fn num_lines(&self) -> usize {
@@ -168,7 +204,7 @@ impl TextBuffer {
         let contents = self.contents.clone();
         assert!(main_cursor_start != usize::MAX);
         
-        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset: self.grapheme_col_offset}
+        Self {file, cursors, main_cursor_start, contents, ..*self}
     }
 
     // move_horizontal moves the main cursor horizontally by `offset` graphemes
@@ -195,7 +231,7 @@ impl TextBuffer {
         assert!(main_cursor_start != usize::MAX);
         
         let grapheme_col_offset = (self.grapheme_col_offset as i64 + offset) as usize;
-        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset}
+        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset, ..*self}
     }
 
     // note: this is a little tricky because it can change the number of cursors.
@@ -232,7 +268,7 @@ impl TextBuffer {
         }
         assert!(main_cursor_start != usize::MAX);
         let grapheme_col_offset = reset_grapheme_col_offset(&self.contents, main_cursor_start);
-        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset}
+        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset, ..*self}
     }
 
     // we're assuming text ends on a grapheme boundary
@@ -261,7 +297,7 @@ impl TextBuffer {
         assert!(main_cursor_start != usize::MAX);
 
         let grapheme_col_offset = reset_grapheme_col_offset(&self.contents, main_cursor_start);
-        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset}
+        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset, ..*self}
     }
 
     pub fn lines(&self) -> crop::iter::Lines {
@@ -290,6 +326,7 @@ mod tests {
             contents, 
             main_cursor_start: start,
             grapheme_col_offset,
+            ..Default::default()
         }
     }
 
@@ -402,59 +439,89 @@ mod tests {
     }
 }
 
-pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffer_ref: Arc<ArcSwapAny<Arc<TextBuffer>>>, event_loop_proxy: EventLoopProxy<CustomEvent>) -> impl FnOnce(&crossbeam::thread::Scope<'_>) {
-    move |_| {
+pub struct BufferList {
+    list: ArcSwap<Vec<TextBuffer>>,
+}
+
+impl BufferList {
+    pub fn new() -> Self {
+        Self {
+            list: ArcSwap::new(Arc::new(vec![])),
+        }
+    }
+
+    pub fn store(&self, index: usize, buffer: TextBuffer) {
+        let mut list: Vec<TextBuffer> = (**self.list.load()).to_owned();
+        if index == list.len() {
+            list.push(buffer);
+        } else {
+            list[index] = buffer;
+        }
+        self.list.store(Arc::new(list));
+    }
+
+    pub fn get(&self) -> arc_swap::Guard<Arc<Vec<TextBuffer>>> {
+        let x = self.list.load();
+        x
+    }
+    
+    pub fn len(&self) -> usize {
+        self.get().len()
+    }
+}
+
+pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffers: Arc<BufferList>, event_loop_proxy: EventLoopProxy<CustomEvent>) -> impl FnOnce() {
+    move || {
         while let Ok(received) = buffer_rx.recv() {
             match received {
-                BufferOp::Delete => {
-                    let buffer = buffer_ref.load();
-                    buffer_ref.store(Arc::new(buffer.backdelete_cursor()));
+                BufferOp::Delete(buf_id) => {
+                    buffers.store(buf_id, buffers.get()[buf_id].backdelete_cursor());
                 },
-                BufferOp::Insert(s) => {
-                    let buffer = buffer_ref.load();
-                    buffer_ref.store(Arc::new(buffer.insert(&s)));
+                BufferOp::Insert(buf_id, s) => {
+                    let buffer = &buffers.get()[buf_id];
+                    buffers.store(buf_id, buffer.insert(&s));
                 },
-                BufferOp::MoveHorizontal(n) => {
-                    let buffer = buffer_ref.load();
-                    buffer_ref.store(Arc::new(buffer.move_horizontal(n)));
+                BufferOp::MoveHorizontal(buf_id, n) => {
+                    buffers.store(buf_id, buffers.get()[buf_id].move_horizontal(n));
                 },
-                BufferOp::MoveVertical(n) => {
-                    let buffer = buffer_ref.load();
-                    buffer_ref.store(Arc::new(buffer.move_vertical(n)));
+                BufferOp::MoveVertical(buf_id, n) => {
+                    let buffer = buffers.get()[buf_id].clone();
+                    buffers.store(buf_id, buffer.move_vertical(n));
                 },
-                BufferOp::Save => {
-                    let buffer = buffer_ref.load();
+                BufferOp::Save(buf_id) => {
+                    let buffer = buffers.get()[buf_id].clone();
                     let filepath = &buffer.file.as_ref().unwrap().filename;
                     match buffer.write(filepath) {
                         Err(e) => log::error!("tried to save buffer, but {}", e),
-                        Ok(b) => buffer_ref.store(Arc::new(b)),
+                        Ok(b) => buffers.store(buf_id, b),
                     }
                 },
-                BufferOp::SetMainCursor(i) => {
-                    let buffer = buffer_ref.load();
+                BufferOp::SetMainCursor(buf_id, i) => {
+                    let buffer = buffers.get()[buf_id].clone();
                     let mut cursors = buffer.cursors.clone();
                     let key = &buffer.main_cursor_start;
                     cursors.remove(key);
                     cursors.insert(i, Selection{start: i, offset: 0});
-                    buffer_ref.store(Arc::new(TextBuffer {
+                    buffers.store(buf_id, TextBuffer {
                         main_cursor_start: i,
                         contents: buffer.contents.clone(),
                         file: buffer.file.clone(),
                         cursors,
                         grapheme_col_offset: buffer.grapheme_col_offset,
-                    }));
+                        
+                    });
                 },
-                BufferOp::AddCursor(start) => {
-                    let buffer = buffer_ref.load();
+                BufferOp::AddCursor(buf_id, start) => {
+                    let buffer = buffers.get()[buf_id].clone();
                     let mut cursors = buffer.cursors.clone();
                     cursors.insert(start, Selection{start, offset: 0});
-                    buffer_ref.store(Arc::new(TextBuffer {
+                    buffers.store(buf_id, TextBuffer {
                         main_cursor_start: buffer.main_cursor_start,
                         contents: buffer.contents.clone(),
                         file: buffer.file.clone(),
                         cursors,
                         grapheme_col_offset: buffer.grapheme_col_offset,
-                    }));
+                    });
                 },
             }
             if let Err(e) = event_loop_proxy.send_event(CustomEvent::BufferRequestedRedraw) {
