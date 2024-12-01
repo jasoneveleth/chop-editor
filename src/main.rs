@@ -10,7 +10,6 @@ use objc2_app_kit::NSApplication;
 use objc2_foundation::MainThreadMarker;
 
 use chop::app::App;
-use chop::buffer::CustomEvent;
 use chop::app::AppDelegate;
 
 fn init_logging(log_file: Option<&str>) {
@@ -40,7 +39,9 @@ fn init_logging(log_file: Option<&str>) {
 }
 
 fn main() {
-    init_logging(Some("/tmp/app.log"));
+    // let file = Some("/tmp/app.log");
+    let file = None;
+    init_logging(file);
     let args: Vec<String> = env::args().collect();
     let filename = if args.len() <= 1 {
         None
@@ -48,7 +49,7 @@ fn main() {
         Some(args[1].clone())
     };
 
-    let event_loop = EventLoop::<CustomEvent>::with_user_event().build().unwrap();
+    let event_loop = EventLoop::new().unwrap();
 
     // =================================== weird objc stuff
     let mtm = MainThreadMarker::new().unwrap();
@@ -58,6 +59,7 @@ fn main() {
     ns_app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     // ===================================
 
+    log::info!("calling App::new()");
     let mut app = App::new(filename, event_loop.create_proxy());
     event_loop.run_app(&mut app).unwrap();
 }

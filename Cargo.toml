@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-winit = "0.30.5"
-# vello = { path = "../vello" }
+# we need a newer version than 0.30.5 for custom apple events
+winit = { git = "https://github.com/rust-windowing/winit", rev = "fc6cf89a" }
 env_logger = "0.11.2"
 log = "0.4.18"
 term_size = "0.3.2"
@@ -22,6 +22,10 @@ objc2-app-kit = {version = "0.2.2", features = ["NSApplication", "NSResponder"]}
 objc2-foundation = {version = "0.2.2", features = ["NSThread"]}
 vello = "0.3.0"
 futures = "0.3.31"
+anyhow = "1.0.93"
+
+# debugging
+signal-hook = "0.3"
 
 [package.metadata.bundle]
 name = "Chop"

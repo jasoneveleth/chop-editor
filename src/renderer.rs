@@ -9,6 +9,7 @@ use vello::peniko;
 use vello::skrifa;
 use vello::kurbo::Rect;
 use vello::Scene;
+use std::sync::mpsc;
 
 use crate::buffer::{TextBuffer, CustomEvent};
 use crate::filter_map::{FMTOption, filter_map_terminate};
@@ -53,6 +54,7 @@ pub const CURSOR_HEIGHT: f64 = 35.;
 
 impl FontRender {
     fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> (GlyphPosCache, LineCache) {
+        log::info!("begin render");
         // main font
         let file_ref = skrifa::raw::FileRef::new(self.font.data.as_ref()).unwrap();
         let font_ref = match file_ref {
@@ -237,8 +239,8 @@ pub fn redraw_requested_handler(state: &mut WindowState, buf: &TextBuffer) -> (G
     scene.fill(NonZero, Affine::IDENTITY, font_render.style.bg_color, None, &state.font_render.style.titlebar);
     renderer
         .render_to_surface(
-            &state.render_cx.devices[0].device,
-            &state.render_cx.devices[0].queue,
+            &state.render_cx.devices[state.surface.dev_id].device,
+            &state.render_cx.devices[state.surface.dev_id].queue,
             &scene,
             &frame,
             &vello::RenderParams {
@@ -259,11 +261,12 @@ pub fn redraw_requested_handler(state: &mut WindowState, buf: &TextBuffer) -> (G
     (glyph_pos_cache, line_cache)
 }
 
-pub fn blink_cursor(event_loop_proxy: winit::event_loop::EventLoopProxy<CustomEvent>) {
+pub fn blink_cursor(renderer_tx: mpsc::Sender<CustomEvent>, event_loop_proxy: winit::event_loop::EventLoopProxy) {
     loop {
-        if event_loop_proxy.send_event(CustomEvent::CursorBlink).is_err() {
+        if renderer_tx.send(CustomEvent::CursorBlink).is_err() {
             break;
         }
+        event_loop_proxy.wake_up();
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 }

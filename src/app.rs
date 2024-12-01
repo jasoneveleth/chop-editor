@@ -6,7 +6,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{WindowEvent, DeviceEvent, DeviceId, Modifiers};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
-use futures::executor::block_on;
+use anyhow;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,13 +15,15 @@ use crate::buffer::{TextBuffer, BufferList};
 use crate::renderer::redraw_requested_handler;
 use crate::renderer::FALLBACK_FONT_DATA;
 use crate::renderer::{FontRender, Style, TITLEBAR_HEIGHT, X_PADDING, Y_PADDING, CURSOR_WIDTH, CURSOR_HEIGHT, get_font_metrics};
-// use crate::renderer::blink_cursor;
+use crate::renderer::blink_cursor;
+use crate::buffer::CustomEvent;
 
 use std::ffi::CStr;
 use std::num::NonZeroUsize;
 
-use winit::event::{MouseScrollDelta, ElementState, MouseButton};
+use winit::event::{MouseScrollDelta, ElementState, MouseButton, ButtonSource};
 use winit::window::CursorIcon;
+use winit::window::Cursor;
 use winit::keyboard::{Key, NamedKey, ModifiersKeyState};
 use vello::RendererOptions;
 use vello::kurbo::Rect;
@@ -29,7 +31,6 @@ use vello::util::RenderSurface;
 use vello::{util::RenderContext, Renderer, Scene};
 
 use objc2::rc::Retained;
-// use objc2::runtime::ProtocolObject;
 use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 use objc2_app_kit::{NSApplication, NSApplicationDelegate};
 use objc2_foundation::{NSArray, NSString, NSURL, MainThreadMarker, NSObject, NSObjectProtocol};
@@ -37,10 +38,9 @@ use objc2_foundation::{NSArray, NSString, NSURL, MainThreadMarker, NSObject, NSO
 use std::thread;
 use std::sync::mpsc;
 
-// use crate::buffer::CustomEvent;
 use crate::buffer::BufferOp;
 use crate::buffer::buffer_op_handler;
-use crate::buffer::CustomEvent;
+use crate::buffer::BufferId;
 use crate::renderer::{GlyphPosCache, LineCache};
 
 const FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts/Hack-Regular.ttf");
@@ -55,26 +55,24 @@ pub struct Args {
 
 pub struct WindowState<'a> {
     pub surface: RenderSurface<'a>,
-    pub window: Arc<Window>,
+    pub window: Arc<dyn Window>,
     pub font_render: FontRender,
     pub scene: Scene,
     pub renderer: Renderer,
     pub render_cx: RenderContext,
-    pub glyph_pos_caches: HashMap<usize, GlyphPosCache>,
-    pub line_caches: HashMap<usize, LineCache>,
+    pub glyph_pos_caches: HashMap<BufferId, GlyphPosCache>,
+    pub line_caches: HashMap<BufferId, LineCache>,
 
     pub scroll_y: f32,
-    pub curr_pos: PhysicalPosition<f64>,
     pub should_draw_cursor: bool,
 }
 
 impl<'a> WindowState<'a> {
-    fn new(surface: RenderSurface<'a>, window: Arc<Window>, font_render: FontRender, scene: Scene, renderer: Renderer, render_cx: RenderContext) -> Self {
+    fn new(surface: RenderSurface<'a>, window: Arc<dyn Window>, font_render: FontRender, scene: Scene, renderer: Renderer, render_cx: RenderContext) -> Self {
         let scroll_y = 0.;
         let should_draw_cursor = true;
         let glyph_pos_caches = HashMap::new();
         let line_caches = HashMap::new();
-        let curr_pos = PhysicalPosition {x: 0., y: 0.};
 
         WindowState {
             surface,
@@ -87,7 +85,6 @@ impl<'a> WindowState<'a> {
             line_caches,
 
             scroll_y,
-            curr_pos,
             should_draw_cursor,
         }
     }
@@ -97,9 +94,10 @@ pub struct App<'a> {
     args: Args,
     windows: HashMap<WindowId, WindowState<'a>>,
     buffers: Arc<BufferList>,
-    active_buffer: HashMap<WindowId, usize>,
+    active_buffer: HashMap<WindowId, BufferId>,
     mods: Modifiers,
-    buffer_tx: mpsc::Sender<BufferOp>,
+    buffer_tx: mpsc::Sender<(BufferId, BufferOp)>,
+    render_rx: mpsc::Receiver<CustomEvent>,
 }
 
 declare_class!(
@@ -132,7 +130,7 @@ impl AppDelegate {
 }
 
 impl<'a> App<'a> {
-    pub fn new(filename: Option<String>, event_loop_proxy: EventLoopProxy<CustomEvent>) -> Self {
+    pub fn new(filename: Option<String>, event_loop_proxy: EventLoopProxy) -> Self {
         let font_size = 28.0;
         let bg_color = peniko::Color::rgb8(0xFA, 0xFA, 0xFA);
         let fg_color = peniko::Color::rgb8(0x0, 0x0, 0x0);
@@ -140,13 +138,17 @@ impl<'a> App<'a> {
 
         let (buffer_tx, buffer_rx) = mpsc::channel();
 
+        let (render_tx, render_rx) = mpsc::channel();
+
         let buffers = Arc::new(BufferList::new());
 
         // INVARIANT: BUFFERS SHOULD ONLY EVER BE MODIFIED (`store`d) BY THIS THREAD
         // If this is not upheld, then we have a race condition where the buffer changes
         // between the load, computation, and store, and we miss something
-        let handler = buffer_op_handler(buffer_rx, buffers.clone(), event_loop_proxy);
+        let handler = buffer_op_handler(buffer_rx, buffers.clone(), render_tx.clone(), event_loop_proxy.clone());
         thread::spawn(handler);
+
+        thread::spawn(|| blink_cursor(render_tx, event_loop_proxy));
 
         if let Some(file_path) = &args.filename {
             if let Ok(buffer) = TextBuffer::from_filename(&file_path) {
@@ -167,24 +169,27 @@ impl<'a> App<'a> {
             buffers,
             active_buffer: HashMap::new(),
             buffer_tx,
+            render_rx,
         };
+        log::info!("App::new() finished");
         app
     }
 
-    fn create_window(&mut self, event_loop: &ActiveEventLoop, _tab_id: Option<String>,) -> Result<(), winit::error::OsError> {
+    fn create_window(&mut self, event_loop: &dyn ActiveEventLoop, tab_id: Option<String>, buf_id: BufferId) -> anyhow::Result<WindowId> {
+        log::info!("begin creating window");
         let size = LogicalSize {width: 800, height: 600};
         let mut window_attributes = WindowAttributes::default()
-            .with_inner_size(size)
+            .with_surface_size(size)
             .with_transparent(true)
             .with_fullsize_content_view(true)
             .with_title_hidden(true)
             .with_titlebar_transparent(true);
 
-        if let Some(tab_id) = _tab_id {
+        if let Some(tab_id) = tab_id {
             window_attributes = window_attributes.with_tabbing_identifier(&tab_id);
         }
 
-        let window = Arc::new(event_loop.create_window(window_attributes)?);
+        let window: Arc<dyn Window> = Arc::from(event_loop.create_window(window_attributes)?);
 
         // =============== OLD
         let mut render_cx = RenderContext::new();
@@ -193,10 +198,10 @@ impl<'a> App<'a> {
         let fallback_font = peniko::Font::new(peniko::Blob::new(Arc::new(FALLBACK_FONT_DATA)), 0);
         let (line_height, ascent) = get_font_metrics(&font, self.args.font_size);
 
-        let size = window.inner_size();
+        let size = window.surface_size();
 
-        let surface = block_on(render_cx.create_surface(window.clone(), size.width, size.height, Default::default())).unwrap();
-        let device = &render_cx.devices[0].device;
+        let surface = pollster::block_on(render_cx.create_surface(window.clone(), size.width, size.height, Default::default())).unwrap();
+        let device = &render_cx.devices[surface.dev_id].device;
 
         let use_cpu = false;
         let scene = Scene::new();
@@ -238,22 +243,70 @@ impl<'a> App<'a> {
         };
         // =============== /OLD
 
+        let window_id = window.id();
         let window_state = WindowState::new(surface, window, font_render, scene, renderer, render_cx);
-        let window_id = window_state.window.id();
+        self.active_buffer.insert(window_id, buf_id);
         self.windows.insert(window_id, window_state);
 
-        Ok(())
+        log::info!("window created");
+
+        Ok(window_id)
     }
 }
 
 
-impl<'a> ApplicationHandler<CustomEvent> for App<'a> {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // you're allowed to create a window here
-        self.create_window(event_loop, None).unwrap();
+impl<'a> ApplicationHandler for App<'a> {
+    fn can_create_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        log::info!("can_create_surfaces");
+        let buffer_id = 0;
+        let win_id = self.create_window(_event_loop, None, buffer_id).unwrap();
+
+        // redraw
+        let window_state = self.windows.get(&win_id).expect("create_window() didn't put the window into the hashmap");
+        window_state.window.request_redraw()
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn proxy_wake_up(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        while let Ok(event) = self.render_rx.recv() {
+            // get last focused window
+            let mut focused_window = None;
+            for win_state in self.windows.values() {
+                if win_state.window.has_focus() {
+                    focused_window = Some(win_state.window.id());
+                }
+            }
+
+            // both arms call for a redraw
+            if let Some(window_id) = focused_window {
+                let window_state = self.windows.get_mut(&window_id).unwrap();
+                let redraw = |window_state: &mut WindowState| {
+                    let buf_ind = *self.active_buffer.get(&window_id).unwrap();
+                    let buffer_ref = &self.buffers.get()[buf_ind];
+                    let (gpc, lc) = redraw_requested_handler(window_state, buffer_ref);
+                    window_state.glyph_pos_caches.insert(buf_ind, gpc);
+                    window_state.line_caches.insert(buf_ind, lc);
+                };
+                match event {
+                    CustomEvent::BufferRequestedRedraw(buf_id) => {
+                        if buf_id == *self.active_buffer.get(&window_id).unwrap() {
+                            redraw(window_state);
+                        }
+                    },
+                    CustomEvent::CursorBlink => {
+                        window_state.should_draw_cursor = !window_state.should_draw_cursor;
+                        redraw(window_state);
+                    },
+                }
+            }
+        }
+    }
+
+    fn resumed(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        log::info!("resumed");
+    }
+
+    fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        log::info!("got window_event");
         // `unwrap` is fine, the window will always be available when
         // receiving a window event.
         let mut window_state = self.windows.get_mut(&window_id).unwrap();
@@ -262,154 +315,153 @@ impl<'a> ApplicationHandler<CustomEvent> for App<'a> {
         let raw_buffer = &self.buffers.get()[buf_ind];
 
         match event {
-                WindowEvent::CloseRequested => {
-                    event_loop.exit();
-                },
-                WindowEvent::Resized(size) => {
-                    window_state.font_render.style.vheight = size.height as f32 - TITLEBAR_HEIGHT - Y_PADDING;
-                    window_state.font_render.style.vwidth = size.width as f32 - X_PADDING;
-                    window_state.render_cx.resize_surface(&mut window_state.surface, size.width, size.height);
-                    window_state.window.request_redraw();
-                },
-                WindowEvent::MouseWheel{delta, ..} => {
-                    match delta {
-                        MouseScrollDelta::LineDelta(_, y) => {
-                            // Adjust the scroll position based on the scroll delta
-                            window_state.scroll_y -= y * 20.0; // Adjust the scroll speed as needed
-                            log::warn!("we don't expect a linedelta from mouse scroll on macOS, ignoring");
-                        },
-                        MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
-                            window_state.scroll_y -= y as f32;
-                            // we want to scroll past the top (ie. negative)
-                            let end = (raw_buffer.num_lines()-1) as f32 * window_state.font_render.style.line_height;
-                            window_state.scroll_y = window_state.scroll_y.max(0.).min(end);
-                            window_state.window.request_redraw();
-                        },
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            },
+            WindowEvent::SurfaceResized(size) => {
+                window_state.font_render.style.vheight = size.height as f32 - TITLEBAR_HEIGHT - Y_PADDING;
+                window_state.font_render.style.vwidth = size.width as f32 - X_PADDING;
+                window_state.render_cx.resize_surface(&mut window_state.surface, size.width, size.height);
+                window_state.window.request_redraw();
+            },
+            WindowEvent::MouseWheel{delta, ..} => {
+                match delta {
+                    MouseScrollDelta::LineDelta(_, y) => {
+                        // Adjust the scroll position based on the scroll delta
+                        window_state.scroll_y -= y * 20.0; // Adjust the scroll speed as needed
+                        log::warn!("we don't expect a linedelta from mouse scroll on macOS, ignoring");
+                    },
+                    MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
+                        window_state.scroll_y -= y as f32;
+                        // we want to scroll past the top (ie. negative)
+                        let end = (raw_buffer.num_lines()-1) as f32 * window_state.font_render.style.line_height;
+                        window_state.scroll_y = window_state.scroll_y.max(0.).min(end);
+                        window_state.window.request_redraw();
+                    },
+                }
+            },
+            WindowEvent::PointerButton { device_id: _, state, position, button, primary: _ } => {
+                if state == ElementState::Pressed && button == ButtonSource::Mouse(MouseButton::Left) {
+                    let x = position.x as f32;
+                    let y = position.y as f32;
+
+                    // find closest line
+                    let mut closest_line = None;
+                    let mut closest = f32::MAX;
+                    let lines = window_state.line_caches.get(&buf_ind).unwrap();
+                    for y1 in lines.iter() {
+                        let middle = y1-window_state.font_render.style.ascent/2.;
+                        let dist = (y - middle).abs();
+                        if dist < closest {
+                            closest = dist;
+                            closest_line = Some(y1);
+                        }
                     }
-                },
-                WindowEvent::MouseInput { device_id: _, state, button } => {
-                    if state == ElementState::Pressed && button == MouseButton::Left {
-                        let x = window_state.curr_pos.x as f32;
-                        let y = window_state.curr_pos.y as f32;
+                    assert!(closest_line.is_some());
+                    let right_line: f32 = *closest_line.unwrap();
 
-                        // find closest line
-                        let mut closest_line = None;
-                        let mut closest = f32::MAX;
-                        let lines = window_state.line_caches.get(&buf_ind).unwrap();
-                        for y1 in lines.iter() {
-                            let middle = y1-window_state.font_render.style.ascent/2.;
-                            let dist = (y - middle).abs();
-                            if dist < closest {
-                                closest = dist;
-                                closest_line = Some(y1);
-                            }
+                    // which glyph
+                    let mut closest = None;
+                    let mut closest_dist = f32::MAX;
+                    for (i, ((_, _), (x1, y1))) in window_state.glyph_pos_caches.get(&buf_ind).unwrap().iter() {
+                        if *y1 != right_line {
+                            continue;
                         }
-                        assert!(closest_line.is_some());
-                        let right_line: f32 = *closest_line.unwrap();
+                        let dx = x - x1;
+                        let dy = y - (y1-window_state.font_render.style.ascent/2.);
 
-                        // which glyph
-                        let mut closest = None;
-                        let mut closest_dist = f32::MAX;
-                        for (i, ((_, _), (x1, y1))) in window_state.glyph_pos_caches.get(&buf_ind).unwrap().iter() {
-                            if *y1 != right_line {
-                                continue;
-                            }
-                            let dx = x - x1;
-                            let dy = y - (y1-window_state.font_render.style.ascent/2.);
-
-                            let dist = dx*dx + dy*dy; 
-                            if dist < closest_dist {
-                                closest = Some(i);
-                                closest_dist = dist;
-                            }
+                        let dist = dx*dx + dy*dy; 
+                        if dist < closest_dist {
+                            closest = Some(i);
+                            closest_dist = dist;
                         }
-                        if let Some(i) = closest {
-                            if self.mods.lalt_state() == ModifiersKeyState::Pressed || self.mods.ralt_state() == ModifiersKeyState::Pressed {
-                                self.buffer_tx.send(BufferOp::AddCursor(buf_ind, *i)).unwrap();
+                    }
+                    if let Some(i) = closest {
+                        if self.mods.lalt_state() == ModifiersKeyState::Pressed || self.mods.ralt_state() == ModifiersKeyState::Pressed {
+                            self.buffer_tx.send((buf_ind, BufferOp::AddCursor(*i))).unwrap();
+                        } else {
+                            self.buffer_tx.send((buf_ind, BufferOp::SetMainCursor(*i))).unwrap();
+                        }
+                    }
+                } else {
+                    log::info!("mouse input: {state:?}, {button:?}");
+                }
+            },
+            WindowEvent::ModifiersChanged(state) => {
+                self.mods = state
+            },
+            WindowEvent::PointerMoved { device_id: _, position, primary: _, source: _ } => {
+                if position.y <= window_state.font_render.style.voffset_y as f64 {
+                    window_state.window.set_cursor(Cursor::Icon(CursorIcon::Default));
+                } else {
+                    window_state.window.set_cursor(Cursor::Icon(CursorIcon::Text));
+                }
+            },
+            WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
+                log::info!("keyboard input: {:?} {:?}", event.logical_key, event.state);
+                if event.state != ElementState::Released {
+                    match event.logical_key {
+                        Key::Character(s) => {
+                            // EMOJI
+                            let char = s.chars().nth(0).unwrap();
+                            if char == 'w' && super_pressed(&self.mods) {
+                                event_loop.exit();
+                            } else if char == 's' && super_pressed(&self.mods) {
+                                self.buffer_tx.send((buf_ind, BufferOp::Save)).unwrap();
                             } else {
-                                self.buffer_tx.send(BufferOp::SetMainCursor(buf_ind, *i)).unwrap();
+                                self.buffer_tx.send((buf_ind, BufferOp::Insert(String::from(s.as_str())))).unwrap();
+                            }
+                        },
+                        Key::Named(n) => {
+                            match n {
+                                NamedKey::Enter => self.buffer_tx.send((buf_ind, BufferOp::Insert(String::from("\n")))).unwrap(),
+                                NamedKey::ArrowLeft => self.buffer_tx.send((buf_ind, BufferOp::MoveHorizontal(-1))).unwrap(),
+                                NamedKey::ArrowRight => self.buffer_tx.send((buf_ind, BufferOp::MoveHorizontal(1))).unwrap(),
+                                NamedKey::ArrowUp => self.buffer_tx.send((buf_ind, BufferOp::MoveVertical(-1))).unwrap(),
+                                NamedKey::ArrowDown => self.buffer_tx.send((buf_ind, BufferOp::MoveVertical(1))).unwrap(),
+                                NamedKey::Space => self.buffer_tx.send((buf_ind, BufferOp::Insert(String::from(" ")))).unwrap(),
+                                NamedKey::Backspace => self.buffer_tx.send((buf_ind, BufferOp::Delete)).unwrap(),
+                                _ => (),
                             }
                         }
-                    } else {
-                        log::info!("mouse input: {state:?}, {button:?}");
+                        a => {log::info!("unknown keyboard input: {a:?}");},
                     }
-                },
-                WindowEvent::ModifiersChanged(state) => {
-                    self.mods = state
-                },
-                WindowEvent::CursorMoved { device_id: _, position } => {
-                    if position.y <= window_state.font_render.style.voffset_y as f64 {
-                        window_state.window.set_cursor(CursorIcon::Default);
-                    } else {
-                        window_state.window.set_cursor(CursorIcon::Text);
-                    }
-                    window_state.curr_pos = position;
-                },
-                WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
-                    log::info!("keyboard input: {:?} {:?}", event.logical_key, event.state);
-                    if event.state != ElementState::Released {
-                        match event.logical_key {
-                            Key::Character(s) => {
-                                // EMOJI
-                                let char = s.chars().nth(0).unwrap();
-                                if char == 'w' && super_pressed(&self.mods) {
-                                    event_loop.exit();
-                                } else if char == 's' && super_pressed(&self.mods) {
-                                    self.buffer_tx.send(BufferOp::Save(buf_ind)).unwrap();
-                                } else {
-                                    self.buffer_tx.send(BufferOp::Insert(buf_ind, String::from(s.as_str()))).unwrap();
-                                }
-                            },
-                            Key::Named(n) => {
-                                match n {
-                                    NamedKey::Enter => self.buffer_tx.send(BufferOp::Insert(buf_ind, String::from("\n"))).unwrap(),
-                                    NamedKey::ArrowLeft => self.buffer_tx.send(BufferOp::MoveHorizontal(buf_ind, -1)).unwrap(),
-                                    NamedKey::ArrowRight => self.buffer_tx.send(BufferOp::MoveHorizontal(buf_ind, 1)).unwrap(),
-                                    NamedKey::ArrowUp => self.buffer_tx.send(BufferOp::MoveVertical(buf_ind, -1)).unwrap(),
-                                    NamedKey::ArrowDown => self.buffer_tx.send(BufferOp::MoveVertical(buf_ind, 1)).unwrap(),
-                                    NamedKey::Space => self.buffer_tx.send(BufferOp::Insert(buf_ind, String::from(" "))).unwrap(),
-                                    NamedKey::Backspace => self.buffer_tx.send(BufferOp::Delete(buf_ind)).unwrap(),
-                                    _ => (),
-                                }
-                            }
-                            a => {log::info!("unknown keyboard input: {a:?}");},
-                        }
-                    }
-                },
-                WindowEvent::RedrawRequested => {
-                    log::info!("redraw requested");
-                    let (gpc, lc) = redraw_requested_handler(&mut window_state, &raw_buffer);
-                    window_state.glyph_pos_caches.insert(buf_ind, gpc);
-                    window_state.line_caches.insert(buf_ind, lc);
-                },
-                _ => (),
+                }
+            },
+            WindowEvent::RedrawRequested => {
+                log::info!("redraw requested");
+                let (gpc, lc) = redraw_requested_handler(&mut window_state, &raw_buffer);
+                window_state.glyph_pos_caches.insert(buf_ind, gpc);
+                window_state.line_caches.insert(buf_ind, lc);
+            },
+            WindowEvent::ThemeChanged(_theme) => {
+                // TODO
             }
+            _ => (),
+        }
     }
-            // Event::UserEvent(event) => match event {
-            //     CustomEvent::BufferRequestedRedraw => {
-            //         let (gpc, lc) = redraw_requested_handler(&mut state, &buffer_ref, &window);
-            //         glyph_pos_cache = gpc;
-            //         line_cache = lc;
-            //     },
-            //     CustomEvent::CursorBlink => {
-            //         state.should_draw_cursor = !state.should_draw_cursor;
-            //         let (gpc, lc) = redraw_requested_handler(&mut state, &buffer_ref, &window);
-            //         glyph_pos_cache = gpc;
-            //         line_cache = lc;
-            //     },
-            // },
-            // _ => (),
 
-    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _device_id: DeviceId, event: DeviceEvent) {
+    fn device_event(&mut self, _event_loop: &dyn ActiveEventLoop, _device_id: Option<DeviceId>, _event: DeviceEvent) {
         // Handle window event.
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // probably remove???? idk what about_to_wait() is for
-        // if let Some(window) = self.window.as_ref() {
-        //     window.request_redraw();
-        //     self.counter += 1;
-        // }
+    fn about_to_wait(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        // find focused window
+        let mut focused_window = None;
+        for win_state in self.windows.values() {
+            if win_state.window.has_focus() {
+                focused_window = Some(win_state.window.id());
+            }
+        }
+        if let Some(win_id) = focused_window {
+            let window_state = self.windows.get(&win_id).expect("we've lost the focused window's in the app.windows hashmap");
+            window_state.window.request_redraw();
+        }
+    }
+
+    fn suspended(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        log::warn!("suspended");
+        // TODO supposed to drop the surface I think
     }
 }
 

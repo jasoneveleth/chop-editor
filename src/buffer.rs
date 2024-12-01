@@ -11,21 +11,21 @@ use arc_swap::ArcSwap;
 use winit::event_loop::EventLoopProxy;
 use std::sync::mpsc;
 
-type BufferId = usize;
+pub type BufferId = usize;
 
 pub enum BufferOp {
-    Insert(BufferId, String),
-    Delete(BufferId),
-    Save(BufferId),
-    MoveHorizontal(BufferId, i64),
-    MoveVertical(BufferId, i64),
-    SetMainCursor(BufferId, usize),
-    AddCursor(BufferId, usize),
+    Insert(String),
+    Delete,
+    Save,
+    MoveHorizontal(i64),
+    MoveVertical(i64),
+    SetMainCursor(usize),
+    AddCursor(usize),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum CustomEvent {
-    BufferRequestedRedraw,
+    BufferRequestedRedraw(BufferId),
     CursorBlink,
 }
 
@@ -470,25 +470,25 @@ impl BufferList {
     }
 }
 
-pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffers: Arc<BufferList>, event_loop_proxy: EventLoopProxy<CustomEvent>) -> impl FnOnce() {
+pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<(BufferId, BufferOp)>, buffers: Arc<BufferList>, render_tx: mpsc::Sender<CustomEvent>, event_loop_proxy: EventLoopProxy) -> impl FnOnce() {
     move || {
-        while let Ok(received) = buffer_rx.recv() {
+        while let Ok((buf_id, received)) = buffer_rx.recv() {
             match received {
-                BufferOp::Delete(buf_id) => {
+                BufferOp::Delete => {
                     buffers.store(buf_id, buffers.get()[buf_id].backdelete_cursor());
                 },
-                BufferOp::Insert(buf_id, s) => {
+                BufferOp::Insert(s) => {
                     let buffer = &buffers.get()[buf_id];
                     buffers.store(buf_id, buffer.insert(&s));
                 },
-                BufferOp::MoveHorizontal(buf_id, n) => {
+                BufferOp::MoveHorizontal(n) => {
                     buffers.store(buf_id, buffers.get()[buf_id].move_horizontal(n));
                 },
-                BufferOp::MoveVertical(buf_id, n) => {
+                BufferOp::MoveVertical(n) => {
                     let buffer = buffers.get()[buf_id].clone();
                     buffers.store(buf_id, buffer.move_vertical(n));
                 },
-                BufferOp::Save(buf_id) => {
+                BufferOp::Save => {
                     let buffer = buffers.get()[buf_id].clone();
                     let filepath = &buffer.file.as_ref().unwrap().filename;
                     match buffer.write(filepath) {
@@ -496,7 +496,7 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffers: Arc<Buffe
                         Ok(b) => buffers.store(buf_id, b),
                     }
                 },
-                BufferOp::SetMainCursor(buf_id, i) => {
+                BufferOp::SetMainCursor(i) => {
                     let buffer = buffers.get()[buf_id].clone();
                     let mut cursors = buffer.cursors.clone();
                     let key = &buffer.main_cursor_start;
@@ -511,7 +511,7 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffers: Arc<Buffe
                         
                     });
                 },
-                BufferOp::AddCursor(buf_id, start) => {
+                BufferOp::AddCursor(start) => {
                     let buffer = buffers.get()[buf_id].clone();
                     let mut cursors = buffer.cursors.clone();
                     cursors.insert(start, Selection{start, offset: 0});
@@ -524,8 +524,11 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<BufferOp>, buffers: Arc<Buffe
                     });
                 },
             }
-            if let Err(e) = event_loop_proxy.send_event(CustomEvent::BufferRequestedRedraw) {
+            // TODO: sketchy, we should tell the renderer which buffer to redraw
+            if let Err(e) = render_tx.send(CustomEvent::BufferRequestedRedraw(buf_id)) {
                 log::error!("failed to send redraw event: {}", e);
+            } else {
+                event_loop_proxy.wake_up();
             }
         }
     }
