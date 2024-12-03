@@ -385,8 +385,13 @@ impl<'a> ApplicationHandler for App<'a> {
                 self.mods = state
             },
             WindowEvent::PointerMoved { device_id: _, position, primary: _, source: _ } => {
-                if position.y <= window_state.font_render.style.voffset_y as f64 {
-                    window_state.window.set_cursor(Cursor::Icon(CursorIcon::Grab));
+                let top = window_state.font_render.style.voffset_y;
+                if position.y <= top as f64 {
+                    if position.x < 128. { // buttons
+                        window_state.window.set_cursor(Cursor::Icon(CursorIcon::Default));
+                    } else {
+                        window_state.window.set_cursor(Cursor::Icon(CursorIcon::Grab));
+                    }
                 } else {
                     window_state.window.set_cursor(Cursor::Icon(CursorIcon::Text));
                 }
