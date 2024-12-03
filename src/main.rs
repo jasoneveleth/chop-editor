@@ -1,3 +1,4 @@
+#![allow(unused)]
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -39,6 +40,8 @@ fn init_logging(log_file: Option<&str>) {
 }
 
 fn main() {
+    println!("PID: {}", std::process::id());
+
     // let file = Some("/tmp/app.log");
     let file = None;
     init_logging(file);

@@ -171,12 +171,10 @@ impl<'a> App<'a> {
             buffer_tx,
             render_rx,
         };
-        log::info!("App::new() finished");
         app
     }
 
     fn create_window(&mut self, event_loop: &dyn ActiveEventLoop, tab_id: Option<String>, buf_id: BufferId) -> anyhow::Result<WindowId> {
-        log::info!("begin creating window");
         let size = LogicalSize {width: 800, height: 600};
         let mut window_attributes = WindowAttributes::default()
             .with_surface_size(size)
@@ -249,7 +247,6 @@ impl<'a> App<'a> {
         self.windows.insert(window_id, window_state);
 
         log::info!("window created");
-
         Ok(window_id)
     }
 }
@@ -257,17 +254,16 @@ impl<'a> App<'a> {
 
 impl<'a> ApplicationHandler for App<'a> {
     fn can_create_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {
-        log::info!("can_create_surfaces");
         let buffer_id = 0;
         let win_id = self.create_window(_event_loop, None, buffer_id).unwrap();
 
         // redraw
-        let window_state = self.windows.get(&win_id).expect("create_window() didn't put the window into the hashmap");
+        let window_state = self.windows.get(&win_id).expect("create_window() didn't put the window into the hashmap, should be impossible");
         window_state.window.request_redraw()
     }
 
     fn proxy_wake_up(&mut self, _event_loop: &dyn ActiveEventLoop) {
-        while let Ok(event) = self.render_rx.recv() {
+        while let Ok(event) = self.render_rx.try_recv() {
             // get last focused window
             let mut focused_window = None;
             for win_state in self.windows.values() {
@@ -301,17 +297,15 @@ impl<'a> ApplicationHandler for App<'a> {
         }
     }
 
-    fn resumed(&mut self, _event_loop: &dyn ActiveEventLoop) {
-        log::info!("resumed");
+    // (unsupported on macOS/windows; relevant for web)
+    fn resumed(&mut self, event_loop: &dyn ActiveEventLoop) {
+        let _ = event_loop;
     }
 
     fn window_event(&mut self, event_loop: &dyn ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
-        log::info!("got window_event");
-        // `unwrap` is fine, the window will always be available when
-        // receiving a window event.
-        let mut window_state = self.windows.get_mut(&window_id).unwrap();
+        let mut window_state = self.windows.get_mut(&window_id).expect("recieving window event but we lost window, should be impossible");
 
-        let buf_ind = *self.active_buffer.get(&window_id).unwrap();
+        let buf_ind = *self.active_buffer.get(&window_id).expect("active window has no active buffer");
         let raw_buffer = &self.buffers.get()[buf_ind];
 
         match event {
@@ -392,7 +386,7 @@ impl<'a> ApplicationHandler for App<'a> {
             },
             WindowEvent::PointerMoved { device_id: _, position, primary: _, source: _ } => {
                 if position.y <= window_state.font_render.style.voffset_y as f64 {
-                    window_state.window.set_cursor(Cursor::Icon(CursorIcon::Default));
+                    window_state.window.set_cursor(Cursor::Icon(CursorIcon::Grab));
                 } else {
                     window_state.window.set_cursor(Cursor::Icon(CursorIcon::Text));
                 }
@@ -429,7 +423,6 @@ impl<'a> ApplicationHandler for App<'a> {
                 }
             },
             WindowEvent::RedrawRequested => {
-                log::info!("redraw requested");
                 let (gpc, lc) = redraw_requested_handler(&mut window_state, &raw_buffer);
                 window_state.glyph_pos_caches.insert(buf_ind, gpc);
                 window_state.line_caches.insert(buf_ind, lc);
@@ -445,23 +438,14 @@ impl<'a> ApplicationHandler for App<'a> {
         // Handle window event.
     }
 
-    fn about_to_wait(&mut self, _event_loop: &dyn ActiveEventLoop) {
-        // find focused window
-        let mut focused_window = None;
-        for win_state in self.windows.values() {
-            if win_state.window.has_focus() {
-                focused_window = Some(win_state.window.id());
-            }
-        }
-        if let Some(win_id) = focused_window {
-            let window_state = self.windows.get(&win_id).expect("we've lost the focused window's in the app.windows hashmap");
-            window_state.window.request_redraw();
-        }
+    // Emitted when the event loop is about to block and wait for new events.
+    fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
+        let _ = event_loop;
     }
 
-    fn suspended(&mut self, _event_loop: &dyn ActiveEventLoop) {
-        log::warn!("suspended");
-        // TODO supposed to drop the surface I think
+    // (unsupported on macOS/windows; relevant for web: supposed to drop surfaces?)
+    fn suspended(&mut self, event_loop: &dyn ActiveEventLoop) {
+        let _ = event_loop;
     }
 }
 
