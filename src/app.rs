@@ -335,6 +335,11 @@ impl<'a> ApplicationHandler for App<'a> {
                 }
             },
             WindowEvent::PointerButton { device_id: _, state, position, button, primary: _ } => {
+                let top = window_state.font_render.style.voffset_y;
+                if position.y < top as f64 {
+                    return;
+                }
+
                 if state == ElementState::Pressed && button == ButtonSource::Mouse(MouseButton::Left) {
                     let x = position.x as f32;
                     let y = position.y as f32;
