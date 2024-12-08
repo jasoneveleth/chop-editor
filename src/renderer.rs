@@ -183,6 +183,12 @@ impl FontRender {
                     }
                 }),
             );
+
+        // add EOF glyph position
+        let n = buffer.contents.byte_len();
+        if let Some(_) = pos_cache.get(&(n-1)) {
+            pos_cache.insert(n, ((pen_x, pen_y), (pen_x + off_x, pen_y + off_y)));
+        }
         (pos_cache, line_cache)
     }
 }
