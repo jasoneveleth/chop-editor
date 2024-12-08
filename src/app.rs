@@ -356,8 +356,9 @@ impl<'a> ApplicationHandler for App<'a> {
                             closest_line = Some(y1);
                         }
                     }
-                    assert!(closest_line.is_some());
-                    let right_line: f32 = *closest_line.unwrap();
+                    let closest_line = closest_line.expect("no lines in line cache");
+                    println!("closest line: {:?}", closest_line);
+                    let right_line: f32 = *closest_line;
 
                     // which glyph
                     let mut closest = None;

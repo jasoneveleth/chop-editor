@@ -216,12 +216,12 @@ impl TextBuffer {
         for s in self.cursors_iter() {
             let mut start = s.start as i64;
             for _ in 0..offset.abs() {
-                start = (start + dir).max(0);
+                start = (start + dir).max(0).min(self.contents.byte_len() as i64);
                 while !self.contents.is_grapheme_boundary(start as usize) {
                     start += dir;
                 }
             }
-            let start = (start.max(0) as usize).min(self.contents.byte_len());
+            let start = start as usize;
             if s.start == self.main_cursor_start {
                 main_cursor_start = start;
             }
@@ -296,7 +296,7 @@ impl TextBuffer {
         }
         assert!(main_cursor_start != usize::MAX);
 
-        let grapheme_col_offset = reset_grapheme_col_offset(&self.contents, main_cursor_start);
+        let grapheme_col_offset = reset_grapheme_col_offset(&contents, main_cursor_start);
         Self {file, cursors, main_cursor_start, contents, grapheme_col_offset, ..*self}
     }
 
@@ -310,6 +310,7 @@ impl TextBuffer {
 }
 
 fn reset_grapheme_col_offset(contents: &Rope, start: usize) -> usize {
+    // FIXME TODO: wrong!!!?!?!
     contents.byte_slice(0..start).graphemes().count()
 }
 
