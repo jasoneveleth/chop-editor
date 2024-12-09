@@ -240,8 +240,6 @@ pub fn redraw_requested_handler(state: &mut WindowState, buf: &TextBuffer) -> (G
                     scene.fill(NonZero, inframe, font_render.style.selection_color, None, &selection);
                 }
             }
-        } else {
-            println!("cursor not found in cache: {}", c.start);
         }
     }
     // draw titlebar

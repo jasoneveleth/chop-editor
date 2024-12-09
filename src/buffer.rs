@@ -230,7 +230,8 @@ impl TextBuffer {
         let contents = self.contents.clone();
         assert!(main_cursor_start != usize::MAX);
         
-        let grapheme_col_offset = (self.grapheme_col_offset as i64 + offset) as usize;
+        // optimization: we could try to guess from the offset, but need to know if we change lines
+        let grapheme_col_offset = reset_grapheme_col_offset(&contents, main_cursor_start);
         Self {file, cursors, main_cursor_start, contents, grapheme_col_offset, ..*self}
     }
 
@@ -310,7 +311,8 @@ impl TextBuffer {
 }
 
 fn reset_grapheme_col_offset(contents: &Rope, start: usize) -> usize {
-    contents.byte_slice(0..start).graphemes().count()
+    let line_start = contents.byte_of_line(contents.line_of_byte(start));
+    contents.byte_slice(line_start..start).graphemes().count()
 }
 
 #[cfg(test)]
@@ -496,7 +498,7 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<(BufferId, BufferOp)>, buffer
                         Ok(b) => buffers.store(buf_id, b),
                     }
                 },
-                BufferOp::SetMainCursor(i) => {
+                BufferOp::SetMainCursor(i) => { // if mouse is clicked for ex
                     let buffer = buffers.get()[buf_id].clone();
                     let mut cursors = buffer.cursors.clone();
                     let key = &buffer.main_cursor_start;
@@ -507,7 +509,7 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<(BufferId, BufferOp)>, buffer
                         contents: buffer.contents.clone(),
                         file: buffer.file.clone(),
                         cursors,
-                        grapheme_col_offset: buffer.grapheme_col_offset,
+                        grapheme_col_offset: reset_grapheme_col_offset(&buffer.contents, i),
                         
                     });
                 },
