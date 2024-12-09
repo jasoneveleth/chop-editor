@@ -357,7 +357,6 @@ impl<'a> ApplicationHandler for App<'a> {
                         }
                     }
                     let closest_line = closest_line.expect("no lines in line cache");
-                    println!("closest line: {:?}", closest_line);
                     let right_line: f32 = *closest_line;
 
                     // which glyph
@@ -404,9 +403,15 @@ impl<'a> ApplicationHandler for App<'a> {
             },
             WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
                 log::info!("keyboard input: {:?} {:?}", event.logical_key, event.state);
+
                 if event.state != ElementState::Released {
                     match event.logical_key {
                         Key::Character(s) => {
+                            let pos_cache = window_state.glyph_pos_caches.get(&buf_ind).unwrap();
+                            println!("cursor: {:?}", raw_buffer.cursors);
+                            for (i, ((_, _), (x, y))) in pos_cache.iter() {
+                                println!("{}: {}, {}", i, x, y);
+                            }
                             // EMOJI
                             let char = s.chars().nth(0).unwrap();
                             if char == 'w' && super_pressed(&self.mods) {

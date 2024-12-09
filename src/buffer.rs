@@ -125,7 +125,7 @@ impl TextBuffer {
     }
 
     pub fn from_blank() -> Self {
-        let contents = Rope::from("abcdefgh\nijklmnop\nqrstuvwx\nyz");
+        let contents = Rope::new();
         let mut cursors = OrdMap::new();
         let start = 0;
         cursors.insert(start, Selection{start, offset: 0});
@@ -310,7 +310,6 @@ impl TextBuffer {
 }
 
 fn reset_grapheme_col_offset(contents: &Rope, start: usize) -> usize {
-    // FIXME TODO: wrong!!!?!?!
     contents.byte_slice(0..start).graphemes().count()
 }
 

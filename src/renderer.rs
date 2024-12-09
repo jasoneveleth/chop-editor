@@ -114,6 +114,8 @@ impl FontRender {
                 filter_map_terminate(graphemes, |c| {
                     let probably_one = c.len();
                     let c = c.to_string().chars().nth(0).unwrap();
+                    let prev_index = index;
+                    index += probably_one;
                     if c != '\n' && pen_x > self.style.vwidth { // if we're off screen just skip
                         return if line_nr >= (last_line as usize) - 1 {
                             // if we're off screen and last line we're done
@@ -123,8 +125,7 @@ impl FontRender {
                         };
                     }
 
-                    pos_cache.insert(index, ((pen_x, pen_y), (pen_x + off_x, pen_y + off_y)));
-                    index += probably_one;
+                    pos_cache.insert(prev_index, ((pen_x, pen_y), (pen_x + off_x, pen_y + off_y)));
 
                     // we skip \n and \t. Otherwise try looking in the 
                     // font and the fallback font.
@@ -186,7 +187,7 @@ impl FontRender {
 
         // add EOF glyph position
         let n = buffer.contents.byte_len();
-        if let Some(_) = pos_cache.get(&(n-1)) {
+        if n == 0 || pos_cache.get(&(n-1)).is_some() {
             pos_cache.insert(n, ((pen_x, pen_y), (pen_x + off_x, pen_y + off_y)));
         }
         (pos_cache, line_cache)
@@ -239,6 +240,8 @@ pub fn redraw_requested_handler(state: &mut WindowState, buf: &TextBuffer) -> (G
                     scene.fill(NonZero, inframe, font_render.style.selection_color, None, &selection);
                 }
             }
+        } else {
+            println!("cursor not found in cache: {}", c.start);
         }
     }
     // draw titlebar
