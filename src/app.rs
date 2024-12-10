@@ -98,6 +98,7 @@ pub struct App<'a> {
     mods: Modifiers,
     buffer_tx: mpsc::Sender<(BufferId, BufferOp)>,
     render_rx: mpsc::Receiver<CustomEvent>,
+    cursor_blink_last_key: mpsc::Sender<()>,
 }
 
 declare_class!(
@@ -148,7 +149,8 @@ impl<'a> App<'a> {
         let handler = buffer_op_handler(buffer_rx, buffers.clone(), render_tx.clone(), event_loop_proxy.clone());
         thread::spawn(handler);
 
-        thread::spawn(|| blink_cursor(render_tx, event_loop_proxy));
+        let (cursor_blink_last_key, cursor_blink_rx) = mpsc::channel();
+        thread::spawn(|| blink_cursor(render_tx, event_loop_proxy, cursor_blink_rx));
 
         if let Some(file_path) = &args.filename {
             if let Ok(buffer) = TextBuffer::from_filename(&file_path) {
@@ -170,6 +172,7 @@ impl<'a> App<'a> {
             active_buffer: HashMap::new(),
             buffer_tx,
             render_rx,
+            cursor_blink_last_key,
         };
         app
     }
@@ -407,6 +410,7 @@ impl<'a> ApplicationHandler for App<'a> {
                 if event.state != ElementState::Released {
                     match event.logical_key {
                         Key::Character(s) => {
+                            self.cursor_blink_last_key.send(()).unwrap();
                             // EMOJI
                             let char = s.chars().nth(0).unwrap();
                             if char == 'w' && super_pressed(&self.mods) {
@@ -418,6 +422,7 @@ impl<'a> ApplicationHandler for App<'a> {
                             }
                         },
                         Key::Named(n) => {
+                            self.cursor_blink_last_key.send(()).unwrap();
                             match n {
                                 NamedKey::Enter => self.buffer_tx.send((buf_ind, BufferOp::Insert(String::from("\n")))).unwrap(),
                                 NamedKey::ArrowLeft => self.buffer_tx.send((buf_ind, BufferOp::MoveHorizontal(-1))).unwrap(),

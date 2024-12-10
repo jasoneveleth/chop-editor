@@ -268,13 +268,23 @@ pub fn redraw_requested_handler(state: &mut WindowState, buf: &TextBuffer) -> (G
     (glyph_pos_cache, line_cache)
 }
 
-pub fn blink_cursor(renderer_tx: mpsc::Sender<CustomEvent>, event_loop_proxy: winit::event_loop::EventLoopProxy) {
+pub fn blink_cursor(renderer_tx: mpsc::Sender<CustomEvent>, event_loop_proxy: winit::event_loop::EventLoopProxy, last_key: mpsc::Receiver<()>) {
+    let mut last_time = std::time::Instant::now();
+    let mut cursor_on = true;
     loop {
-        if renderer_tx.send(CustomEvent::CursorBlink).is_err() {
-            break;
+        if last_key.try_recv().is_ok() {
+            last_time = std::time::Instant::now();
         }
-        event_loop_proxy.wake_up();
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        let should_turn_on = (last_time.elapsed().as_millis() % 1000 > 667) && cursor_on;
+        let should_turn_off = (last_time.elapsed().as_millis() % 1000 <= 667) && !cursor_on;
+        if should_turn_on || should_turn_off {
+            if renderer_tx.send(CustomEvent::CursorBlink).is_err() {
+                break;
+            }
+            event_loop_proxy.wake_up();
+            cursor_on = !cursor_on;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
