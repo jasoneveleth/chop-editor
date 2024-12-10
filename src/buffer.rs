@@ -26,7 +26,7 @@ pub enum BufferOp {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum CustomEvent {
     BufferRequestedRedraw(BufferId),
-    CursorBlink,
+    CursorBlink(bool),
 }
 
 // let | be the cursor, and \ be the end of the selection

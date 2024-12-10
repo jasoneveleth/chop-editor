@@ -49,8 +49,8 @@ pub const FALLBACK_FONT_DATA: &[u8] = include_bytes!("/Users/jason/Library/Fonts
 pub const TITLEBAR_HEIGHT: f32 = 56.;
 pub const Y_PADDING: f32 = 0.0;
 pub const X_PADDING: f32 = 20.0;
-pub const CURSOR_WIDTH: f64 = 4.;
-pub const CURSOR_HEIGHT: f64 = 35.;
+pub const CURSOR_WIDTH: f64 = 4.3;
+pub const CURSOR_HEIGHT: f64 = 42.;
 
 impl FontRender {
     fn render(&self, scene: &mut Scene, y_scroll: f32, buffer: &TextBuffer) -> (GlyphPosCache, LineCache) {
@@ -278,11 +278,11 @@ pub fn blink_cursor(renderer_tx: mpsc::Sender<CustomEvent>, event_loop_proxy: wi
         let should_turn_on = (last_time.elapsed().as_millis() % 1000 > 667) && cursor_on;
         let should_turn_off = (last_time.elapsed().as_millis() % 1000 <= 667) && !cursor_on;
         if should_turn_on || should_turn_off {
-            if renderer_tx.send(CustomEvent::CursorBlink).is_err() {
+            cursor_on = !cursor_on;
+            if renderer_tx.send(CustomEvent::CursorBlink(cursor_on)).is_err() {
                 break;
             }
             event_loop_proxy.wake_up();
-            cursor_on = !cursor_on;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }

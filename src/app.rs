@@ -291,8 +291,8 @@ impl<'a> ApplicationHandler for App<'a> {
                             redraw(window_state);
                         }
                     },
-                    CustomEvent::CursorBlink => {
-                        window_state.should_draw_cursor = !window_state.should_draw_cursor;
+                    CustomEvent::CursorBlink(should_draw) => {
+                        window_state.should_draw_cursor = should_draw;
                         redraw(window_state);
                     },
                 }
