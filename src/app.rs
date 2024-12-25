@@ -220,6 +220,57 @@ impl<'a> App<'a> {
         )
             .unwrap();
 
+        let color_scheme: HashMap<_,_> = [
+            ("accent".to_string(),   peniko::Color::parse("#526FFF").unwrap()),
+            ("fg".to_string(),       peniko::Color::parse("#383A42").unwrap()),
+            ("bg".to_string(),       peniko::Color::parse("#FAFAFA").unwrap()),
+            ("bg-1".to_string(),     peniko::Color::parse("#E5E5E6").unwrap()),
+            ("bg-hl".to_string(),    peniko::Color::parse("#CECECE").unwrap()),
+            ("mono-1".to_string(),   peniko::Color::parse("#383A42").unwrap()),
+            ("mono-2".to_string(),   peniko::Color::parse("#696C77").unwrap()),
+            ("mono-3".to_string(),   peniko::Color::parse("#A0A1A7").unwrap()),
+            ("cyan".to_string(),     peniko::Color::parse("#0184BC").unwrap()),
+            ("blue".to_string(),     peniko::Color::parse("#4078F2").unwrap()),
+            ("purple".to_string(),   peniko::Color::parse("#A626A4").unwrap()),
+            ("green".to_string(),    peniko::Color::parse("#50A14F").unwrap()),
+            ("red-1".to_string(),    peniko::Color::parse("#E45649").unwrap()),
+            ("red-2".to_string(),    peniko::Color::parse("#CA1243").unwrap()),
+            ("orange-1".to_string(), peniko::Color::parse("#986801").unwrap()),
+            ("orange-2".to_string(), peniko::Color::parse("#C18401").unwrap()),
+            ("gray".to_string(),     peniko::Color::parse("#EDEDED").unwrap()),
+            ("silver".to_string(),   peniko::Color::parse("#AAAAAA").unwrap()),
+            ("black".to_string(),    peniko::Color::parse("#0F1011").unwrap()),
+        ].iter().cloned().collect();
+
+        let rust_syntax_map: HashMap<_, _> = [
+            ("use", "purple"),
+            ("let", "purple"),
+            ("mutable_specifier", "purple"),
+            ("if", "purple"),
+            ("else", "purple"),
+            ("loop", "purple"),
+            ("break", "purple"),
+            ("fn", "purple"),
+
+            ("identifier", "white"),
+            ("comment", "bg-1"),
+            ("line_comment", "bg-1"),
+            ("//", "bg-1"),
+            ("\"", "green"),
+            ("string_content", "green"),
+            ("escape_sequence", "orange-1"),
+            ("field_identifier", "blue"),
+            ("type_identifier", "yellow"),
+            ("<", "purple"),
+            (">", "purple"),
+            ("&", "purple"),
+            ("*", "purple"),
+            ("..", "purple"),
+            ("=", "purple"),
+            ("primitive_type", "blue"),
+            ("integer_literal", "orange-1"),
+        ].iter().map(|(x, y)| (x.to_string(), y.to_string())).collect();
+
         let style = Style { 
             font_size: self.args.font_size,
             fg_color: self.args.fg_color,
@@ -235,6 +286,8 @@ impl<'a> App<'a> {
             ascent,
             cursor_shape,
             titlebar,
+            color_scheme,
+            rust_syntax_map,
         };
 
         let font_render = FontRender {

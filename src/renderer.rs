@@ -30,6 +30,8 @@ pub struct Style {
     pub ascent: f32,
     pub cursor_shape: Rect,
     pub titlebar: Rect,
+    pub color_scheme: HashMap<String, peniko::Color>,
+    pub rust_syntax_map: HashMap<String, String>,
 }
 
 
