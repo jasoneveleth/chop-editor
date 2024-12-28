@@ -11,12 +11,13 @@ use anyhow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::buffer::{TextBuffer, BufferList};
+use crate::buffer::{TextBuffer, SyncList};
 use crate::renderer::redraw_requested_handler;
 use crate::renderer::FALLBACK_FONT_DATA;
 use crate::renderer::{FontRender, Style, TITLEBAR_HEIGHT, X_PADDING, Y_PADDING, CURSOR_WIDTH, CURSOR_HEIGHT, get_font_metrics};
 use crate::renderer::blink_cursor;
 use crate::buffer::CustomEvent;
+use crate::pane::{PaneId, Pane};
 
 use std::ffi::CStr;
 use std::num::NonZeroUsize;
@@ -62,17 +63,21 @@ pub struct WindowState<'a> {
     pub render_cx: RenderContext,
     pub glyph_pos_caches: HashMap<BufferId, GlyphPosCache>,
     pub line_caches: HashMap<BufferId, LineCache>,
+    pub layout: Layout,
 
-    pub scroll_y: f32,
     pub should_draw_cursor: bool,
+}
+
+pub struct Layout {
+    pane_id: PaneId, // this will need to change
 }
 
 impl<'a> WindowState<'a> {
     fn new(surface: RenderSurface<'a>, window: Arc<dyn Window>, font_render: FontRender, scene: Scene, renderer: Renderer, render_cx: RenderContext) -> Self {
-        let scroll_y = 0.;
         let should_draw_cursor = true;
         let glyph_pos_caches = HashMap::new();
         let line_caches = HashMap::new();
+        let layout = Layout { pane_id: 0};
 
         WindowState {
             surface,
@@ -83,8 +88,8 @@ impl<'a> WindowState<'a> {
             render_cx,
             glyph_pos_caches,
             line_caches,
+            layout,
 
-            scroll_y,
             should_draw_cursor,
         }
     }
@@ -93,12 +98,13 @@ impl<'a> WindowState<'a> {
 pub struct App<'a> {
     args: Args,
     windows: HashMap<WindowId, WindowState<'a>>,
-    buffers: Arc<BufferList>,
+    buffers: Arc<SyncList<TextBuffer>>,
     active_buffer: HashMap<WindowId, BufferId>,
     mods: Modifiers,
-    buffer_tx: mpsc::Sender<(BufferId, BufferOp)>,
+    buffer_tx: mpsc::Sender<(BufferOp, Vec<PaneId>)>,
     render_rx: mpsc::Receiver<CustomEvent>,
     cursor_blink_last_key: mpsc::Sender<()>,
+    panes: Arc<SyncList<Pane>>,
 }
 
 declare_class!(
@@ -141,12 +147,13 @@ impl<'a> App<'a> {
 
         let (render_tx, render_rx) = mpsc::channel();
 
-        let buffers = Arc::new(BufferList::new());
+        let buffers = Arc::new(SyncList::new());
+        let panes = Arc::new(SyncList::new());
 
         // INVARIANT: BUFFERS SHOULD ONLY EVER BE MODIFIED (`store`d) BY THIS THREAD
         // If this is not upheld, then we have a race condition where the buffer changes
         // between the load, computation, and store, and we miss something
-        let handler = buffer_op_handler(buffer_rx, buffers.clone(), render_tx.clone(), event_loop_proxy.clone());
+        let handler = buffer_op_handler(buffer_rx, buffers.clone(), panes.clone(), render_tx.clone(), event_loop_proxy.clone());
         thread::spawn(handler);
 
         let (cursor_blink_last_key, cursor_blink_rx) = mpsc::channel();
@@ -154,14 +161,20 @@ impl<'a> App<'a> {
 
         if let Some(file_path) = &args.filename {
             if let Ok(buffer) = TextBuffer::from_filename(&file_path) {
-                buffers.store(buffers.len(), buffer);
+                let buf_id = buffers.len();
+                let pane_id = panes.len();
+                panes.store(pane_id, Pane::new(buf_id, pane_id));
+                buffers.store(buf_id, buffer);
             } else {
                 log::error!("file doesn't exist {:?}", args.filename);
                 std::process::exit(1);
             }
         } else {
             let buffer = TextBuffer::from_blank();
-            buffers.store(buffers.len(), buffer);
+            let buf_id = buffers.len();
+            let pane_id = panes.len();
+            panes.store(pane_id, Pane::new(buf_id, pane_id));
+            buffers.store(buf_id, buffer);
         }
 
         let app = App {
@@ -173,6 +186,7 @@ impl<'a> App<'a> {
             buffer_tx,
             render_rx,
             cursor_blink_last_key,
+            panes,
         };
         app
     }
@@ -334,7 +348,9 @@ impl<'a> ApplicationHandler for App<'a> {
                 let redraw = |window_state: &mut WindowState| {
                     let buf_ind = *self.active_buffer.get(&window_id).unwrap();
                     let buffer_ref = &self.buffers.get()[buf_ind];
-                    let (gpc, lc) = redraw_requested_handler(window_state, buffer_ref);
+                    let pane = &self.panes.get()[window_state.layout.pane_id];
+                    assert!(buf_ind == pane.buffer_id);
+                    let (gpc, lc) = redraw_requested_handler(window_state, buffer_ref, pane);
                     window_state.glyph_pos_caches.insert(buf_ind, gpc);
                     window_state.line_caches.insert(buf_ind, lc);
                 };
@@ -377,15 +393,17 @@ impl<'a> ApplicationHandler for App<'a> {
             WindowEvent::MouseWheel{delta, ..} => {
                 match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
+                        let end = (raw_buffer.num_lines()-1) as f32 * window_state.font_render.style.line_height;
+
                         // Adjust the scroll position based on the scroll delta
-                        window_state.scroll_y -= y * 20.0; // Adjust the scroll speed as needed
+                        let pane = self.panes.get()[window_state.layout.pane_id].scroll_y(-y * 20., end);
+                        self.panes.store(pane.id, pane);
                         log::warn!("we don't expect a linedelta from mouse scroll on macOS, ignoring");
                     },
                     MouseScrollDelta::PixelDelta(PhysicalPosition{x: _, y}) => {
-                        window_state.scroll_y -= y as f32;
-                        // we want to scroll past the top (ie. negative)
                         let end = (raw_buffer.num_lines()-1) as f32 * window_state.font_render.style.line_height;
-                        window_state.scroll_y = window_state.scroll_y.max(0.).min(end);
+                        let pane = self.panes.get()[window_state.layout.pane_id].scroll_y(-y as f32, end);
+                        self.panes.store(pane.id, pane);
                         window_state.window.request_redraw();
                     },
                 }
@@ -432,10 +450,11 @@ impl<'a> ApplicationHandler for App<'a> {
                         }
                     }
                     if let Some(i) = closest {
+                        let active = vec![window_state.layout.pane_id];
                         if self.mods.lalt_state() == ModifiersKeyState::Pressed || self.mods.ralt_state() == ModifiersKeyState::Pressed {
-                            self.buffer_tx.send((buf_ind, BufferOp::AddCursor(*i))).unwrap();
+                            self.buffer_tx.send((BufferOp::AddCursor(*i), active)).unwrap();
                         } else {
-                            self.buffer_tx.send((buf_ind, BufferOp::SetMainCursor(*i))).unwrap();
+                            self.buffer_tx.send((BufferOp::SetMainCursor(*i), active)).unwrap();
                         }
                     }
                 } else {
@@ -469,21 +488,24 @@ impl<'a> ApplicationHandler for App<'a> {
                             if char == 'w' && super_pressed(&self.mods) {
                                 event_loop.exit();
                             } else if char == 's' && super_pressed(&self.mods) {
-                                self.buffer_tx.send((buf_ind, BufferOp::Save)).unwrap();
+                                let active = vec![window_state.layout.pane_id];
+                                self.buffer_tx.send((BufferOp::Save, active)).unwrap();
                             } else {
-                                self.buffer_tx.send((buf_ind, BufferOp::Insert(String::from(s.as_str())))).unwrap();
+                                let active = vec![window_state.layout.pane_id];
+                                self.buffer_tx.send((BufferOp::Insert(String::from(s.as_str())), active)).unwrap();
                             }
                         },
                         Key::Named(n) => {
                             self.cursor_blink_last_key.send(()).unwrap();
+                            let active = vec![window_state.layout.pane_id];
                             match n {
-                                NamedKey::Enter => self.buffer_tx.send((buf_ind, BufferOp::Insert(String::from("\n")))).unwrap(),
-                                NamedKey::ArrowLeft => self.buffer_tx.send((buf_ind, BufferOp::MoveHorizontal(-1))).unwrap(),
-                                NamedKey::ArrowRight => self.buffer_tx.send((buf_ind, BufferOp::MoveHorizontal(1))).unwrap(),
-                                NamedKey::ArrowUp => self.buffer_tx.send((buf_ind, BufferOp::MoveVertical(-1))).unwrap(),
-                                NamedKey::ArrowDown => self.buffer_tx.send((buf_ind, BufferOp::MoveVertical(1))).unwrap(),
-                                NamedKey::Space => self.buffer_tx.send((buf_ind, BufferOp::Insert(String::from(" ")))).unwrap(),
-                                NamedKey::Backspace => self.buffer_tx.send((buf_ind, BufferOp::Delete)).unwrap(),
+                                NamedKey::Enter => self.buffer_tx.send((BufferOp::Insert(String::from("\n")), active)).unwrap(),
+                                NamedKey::ArrowLeft => self.buffer_tx.send((BufferOp::MoveHorizontal(-1), active)).unwrap(),
+                                NamedKey::ArrowRight => self.buffer_tx.send((BufferOp::MoveHorizontal(1), active)).unwrap(),
+                                NamedKey::ArrowUp => self.buffer_tx.send((BufferOp::MoveVertical(-1), active)).unwrap(),
+                                NamedKey::ArrowDown => self.buffer_tx.send((BufferOp::MoveVertical(1), active)).unwrap(),
+                                NamedKey::Space => self.buffer_tx.send((BufferOp::Insert(String::from(" ")), active)).unwrap(),
+                                NamedKey::Backspace => self.buffer_tx.send((BufferOp::Delete, active)).unwrap(),
                                 _ => (),
                             }
                         }
@@ -492,7 +514,8 @@ impl<'a> ApplicationHandler for App<'a> {
                 }
             },
             WindowEvent::RedrawRequested => {
-                let (gpc, lc) = redraw_requested_handler(&mut window_state, &raw_buffer);
+                let pane = &self.panes.get()[window_state.layout.pane_id];
+                let (gpc, lc) = redraw_requested_handler(&mut window_state, &raw_buffer, pane);
                 window_state.glyph_pos_caches.insert(buf_ind, gpc);
                 window_state.line_caches.insert(buf_ind, lc);
             },

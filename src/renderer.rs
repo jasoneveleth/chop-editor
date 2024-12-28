@@ -14,6 +14,7 @@ use std::sync::mpsc;
 use crate::buffer::{TextBuffer, CustomEvent};
 use crate::filter_map::{FMTOption, filter_map_terminate};
 use crate::app::WindowState;
+use crate::pane::Pane;
 
 pub struct Style {
     pub bg_color: peniko::Color,
@@ -210,7 +211,7 @@ pub fn get_font_metrics(font: &peniko::Font, font_size: f32) -> (f32, f32) {
     (line_height * 2., metrics.ascent)
 }
 
-pub fn redraw_requested_handler(state: &mut WindowState, buf: &TextBuffer) -> (GlyphPosCache, LineCache) {
+pub fn redraw_requested_handler(state: &mut WindowState, buf: &TextBuffer, pane: &Pane) -> (GlyphPosCache, LineCache) {
     let renderer = &mut state.renderer;
     let scene = &mut state.scene;
     let font_render = &state.font_render;
@@ -224,8 +225,8 @@ pub fn redraw_requested_handler(state: &mut WindowState, buf: &TextBuffer) -> (G
     } else {
         false
     };
-    let (glyph_pos_cache, line_cache) = font_render.render(scene, state.scroll_y, &buf);
-    for c in buf.cursors_iter() {
+    let (glyph_pos_cache, line_cache) = font_render.render(scene, pane.y_offset, &buf);
+    for c in pane.cursors_iter() {
         if let Some(pos) = glyph_pos_cache.get(&c.start) {
             let ((_, _), (x, y)) = *pos;
             // draw cursor

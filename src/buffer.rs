@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::iter::Iterator;
 use std::sync::Arc;
@@ -10,6 +11,10 @@ use im::OrdMap;
 use arc_swap::ArcSwap;
 use winit::event_loop::EventLoopProxy;
 use std::sync::mpsc;
+
+use crate::pane::Selection;
+use crate::pane::Pane;
+use crate::pane::PaneId;
 
 pub type BufferId = usize;
 
@@ -29,21 +34,6 @@ pub enum CustomEvent {
     CursorBlink(bool),
 }
 
-// let | be the cursor, and \ be the end of the selection
-
-// "|abc\djk" start: 0, offset: 3
-// "|\abcdjk" start: 0, offset: 0
-// "ab\cdj|k" start: 5, offset: -3
-
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub struct Selection {
-    // `start` is the location of the cursor is in the selection
-    // 0 means before the first byte, and n means after the nth character
-    pub start: usize,
-    // offset to the end of the selection such that `start + offset` is end of selection
-    offset: i64,
-}
-
 #[derive(Debug, Clone)]
 pub struct FileInfo {
     pub filename: Arc<Path>,
@@ -57,36 +47,13 @@ pub struct FileInfo {
 #[derive(Debug, Clone)]
 pub struct TextBuffer {
     pub file: Option<FileInfo>,
-    // !!! this should always be sorted
-    pub cursors: OrdMap<usize, Selection>,
-    // this is the index (byte offset)
-    pub main_cursor_start: usize,
-    // keep track so up/down will maintain rough position
-    pub grapheme_col_offset: usize,
     pub contents: Rope,
-}
-
-impl Selection {
-    pub fn reverse(&self) -> Self {
-        Self {start: self.end(), offset: -self.offset}
-    }
-
-    pub fn end(&self) -> usize {
-        return ((self.start as i64) + self.offset) as usize
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.offset == 0
-    }
 }
 
 impl Default for TextBuffer {
     fn default() -> Self {
         Self {
             file: None,
-            cursors: OrdMap::new(),
-            main_cursor_start: 0,
-            grapheme_col_offset: 0,
             contents: Rope::from(""),
         }
     }
@@ -95,16 +62,10 @@ impl Default for TextBuffer {
 impl TextBuffer {
     pub fn new(
         file: Option<FileInfo>,
-        cursors: OrdMap<usize, Selection>,
-        main_cursor_start: usize,
-        grapheme_col_offset: usize,
         contents: Rope,
         ) -> Self { 
             Self { 
                 file,
-                cursors,
-                main_cursor_start,
-                grapheme_col_offset,
                 contents,
             }
     }
@@ -118,18 +79,12 @@ impl TextBuffer {
         }
         let contents = Rope::from(read_to_string(filename_str)?);
         let fi = FileInfo {filename, is_modified: false, file_time: SystemTime::now()};
-        let mut cursors: OrdMap<usize, Selection> = OrdMap::new();
-        let start = 0;
-        cursors.insert(start, Selection{start, offset: 0});
-        Ok(Self {file: Some(fi), cursors, main_cursor_start: 0, contents, grapheme_col_offset: 0, ..Default::default()})
+        Ok(Self {file: Some(fi), contents, ..Default::default()})
     }
 
     pub fn from_blank() -> Self {
         let contents = Rope::new();
-        let mut cursors = OrdMap::new();
-        let start = 0;
-        cursors.insert(start, Selection{start, offset: 0});
-        Self {file: None, cursors, main_cursor_start: 0, contents, grapheme_col_offset: 0, ..Default::default()}
+        Self {file: None, contents, ..Default::default()}
     }
 
     // has to return Self because writing updates the file info 
@@ -147,11 +102,9 @@ impl TextBuffer {
                 is_modified: false,
                 file_time: SystemTime::now(),
         });
-        let cursors = self.cursors.clone();
         let contents = self.contents.clone();
         Ok(Self {
             file: fi,
-            cursors,
             contents,
             ..*self
         })
@@ -172,11 +125,23 @@ impl TextBuffer {
 
     // move_vertical moves the main cursor vertically by `offset` lines
     // we use the heuristic the width is about the # of graphemes in the line
-    pub fn move_vertical(&self, offset: i64) -> Self {
+    pub fn move_vertical(&self, offset: i64, panes: Vec<Pane>, active: Vec<PaneId>) -> (Self, Vec<Pane>) {
+        let mut h = HashSet::new();
+        for p in panes.iter() {
+            h.insert(p.buffer_id);
+        }
+        // assert only 1 buffer is involved (this buffer)
+        assert!(h.len() == 1, "Only 1 buffer should be involved. Found: {:?}", h);
+
+        // this can change
+        assert!(active.len() == 1);
+        assert!(panes.len() == 1);
+        let pane = panes.iter().filter(|pane| pane.id == active[0]).nth(0).expect("the active pane must be in the involved panes");
+
         let file = self.file.clone();
         let mut cursors = OrdMap::new();
         let mut main_cursor_start = usize::MAX;
-        for s in self.cursors_iter() {
+        for s in pane.cursors_iter() {
             let line = self.contents.line_of_byte(s.start);
             let other_line = ((line as i64 + offset).max(0) as usize).min(self.contents.line_len());
             let other_line_start = self.contents.byte_of_line(other_line);
@@ -187,7 +152,7 @@ impl TextBuffer {
             };
 
             let mut start = other_line_start;
-            for _ in 0..self.grapheme_col_offset {
+            for _ in 0..pane.grapheme_col_offset {
                 if start+1 >= other_line_end {
                     break;
                 }
@@ -197,23 +162,41 @@ impl TextBuffer {
                 }
             }
             cursors.insert(start, Selection{start, offset: 0});
-            if s.start == self.main_cursor_start {
+            if s.start == pane.main_cursor_start {
                 main_cursor_start = start;
             }
         }
         let contents = self.contents.clone();
         assert!(main_cursor_start != usize::MAX);
         
-        Self {file, cursors, main_cursor_start, contents, ..*self}
+        let buf = Self {file, contents, ..*self};
+        let pane = Pane {
+            main_cursor_start,
+            cursors,
+            ..*pane
+        };
+        (buf, vec![pane])
     }
 
     // move_horizontal moves the main cursor horizontally by `offset` graphemes
-    pub fn move_horizontal(&self, offset: i64) -> Self {
+    pub fn move_horizontal(&self, offset: i64, panes: Vec<Pane>, active: Vec<PaneId>) -> (Self, Vec<Pane>) {
+        let mut h = HashSet::new();
+        for p in panes.iter() {
+            h.insert(p.buffer_id);
+        }
+        // assert only 1 buffer is involved (this buffer)
+        assert!(h.len() == 1, "Only 1 buffer should be involved. Found: {:?}", h);
+
+        // this can change
+        assert!(active.len() == 1);
+        assert!(panes.len() == 1);
+        let pane = panes.iter().filter(|pane| pane.id == active[0]).nth(0).expect("the active pane must be in the involved panes");
+
         let file = self.file.clone();
         let mut cursors = OrdMap::new();
         let mut main_cursor_start = usize::MAX;
         let dir = offset / offset.abs();
-        for s in self.cursors_iter() {
+        for s in pane.cursors_iter() {
             let mut start = s.start as i64;
             for _ in 0..offset.abs() {
                 start = (start + dir).max(0).min(self.contents.byte_len() as i64);
@@ -222,7 +205,7 @@ impl TextBuffer {
                 }
             }
             let start = start as usize;
-            if s.start == self.main_cursor_start {
+            if s.start == pane.main_cursor_start {
                 main_cursor_start = start;
             }
             cursors.insert(start, Selection{start, offset: 0 as i64});
@@ -232,17 +215,36 @@ impl TextBuffer {
         
         // optimization: we could try to guess from the offset, but need to know if we change lines
         let grapheme_col_offset = reset_grapheme_col_offset(&contents, main_cursor_start);
-        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset, ..*self}
+        let buf = Self {file, contents, ..*self};
+        let pane = Pane {
+            cursors, 
+            main_cursor_start, 
+            grapheme_col_offset, 
+            ..*pane
+        };
+        (buf, vec![pane])
     }
 
     // note: this is a little tricky because it can change the number of cursors.
     // imagine: abc|d|e  when you backspace you get: ab|e
-    pub fn backdelete_cursor(&self) -> Self {
+    pub fn backdelete_cursor(&self, panes: Vec<Pane>, active: Vec<PaneId>) -> (Self, Vec<Pane>) {
+        let mut h = HashSet::new();
+        for p in panes.iter() {
+            h.insert(p.buffer_id);
+        }
+        // assert only 1 buffer is involved (this buffer)
+        assert!(h.len() == 1, "Only 1 buffer should be involved. Found: {:?}", h);
+
+        // this can change
+        assert!(active.len() == 1);
+        assert!(panes.len() == 1);
+        let pane = panes.iter().filter(|pane| pane.id == active[0]).nth(0).expect("the active pane must be in the involved panes");
+
         let file = self.file.clone();
 
         let mut deleted_bytes = vec![];
         let mut contents = self.contents.clone();
-        for cursor in self.cursors_iter().rev() {
+        for cursor in pane.cursors_iter().rev() {
             // we don't want to go under 0 so we max with 1 before subtracting
             let mut start = cursor.start.max(1) - 1;
             while !contents.is_grapheme_boundary(start) {
@@ -260,20 +262,39 @@ impl TextBuffer {
 
         let mut main_cursor_start = usize::MAX;
         let mut cursors = OrdMap::new();
-        for (i, s) in self.cursors_iter().enumerate() {
+        for (i, s) in pane.cursors_iter().enumerate() {
             let start = s.start - deleted_bytes[deleted_bytes.len()-1 - i];
             cursors.insert(start, Selection{start, offset: 0 as i64});
-            if s.start == self.main_cursor_start {
+            if s.start == pane.main_cursor_start {
                 main_cursor_start = start;
             }
         }
         assert!(main_cursor_start != usize::MAX);
         let grapheme_col_offset = reset_grapheme_col_offset(&self.contents, main_cursor_start);
-        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset, ..*self}
+        let buf = Self {file, contents, ..*self};
+        let pane = Pane {
+            cursors,
+            main_cursor_start, 
+            grapheme_col_offset,
+            ..*pane
+        };
+        (buf, vec![pane])
     }
 
     // we're assuming text ends on a grapheme boundary
-    pub fn insert(&self, text: &str) -> Self {
+    pub fn insert(&self, text: &str, panes: Vec<Pane>, active: Vec<PaneId>) -> (Self, Vec<Pane>) {
+        let mut h = HashSet::new();
+        for p in panes.iter() {
+            h.insert(p.buffer_id);
+        }
+        // assert only 1 buffer is involved (this buffer)
+        assert!(h.len() == 1, "Only 1 buffer should be involved. Found: {:?}", h);
+
+        // this can change
+        assert!(active.len() == 1);
+        assert!(panes.len() == 1);
+        let pane = panes.iter().filter(|pane| pane.id == active[0]).nth(0).expect("the active pane must be in the involved panes");
+
         let file = if let Some(fi) = &self.file {
             let mut file = fi.clone();
             file.is_modified = true;
@@ -286,27 +307,30 @@ impl TextBuffer {
         let mut contents = self.contents.clone();
         let mut main_cursor_start = usize::MAX;
         let mut cursors = OrdMap::new();
-        for (i, s) in self.cursors_iter().enumerate() {
+        for (i, s) in pane.cursors_iter().enumerate() {
             let adjusted_start = s.start + incr*i;
             contents.insert(adjusted_start, text);
             let start = adjusted_start + incr;
             cursors.insert(start, Selection{start, offset: 0});
-            if s.start == self.main_cursor_start {
+            if s.start == pane.main_cursor_start {
                 main_cursor_start = start;
             }
         }
         assert!(main_cursor_start != usize::MAX);
 
         let grapheme_col_offset = reset_grapheme_col_offset(&contents, main_cursor_start);
-        Self {file, cursors, main_cursor_start, contents, grapheme_col_offset, ..*self}
+        let buf = Self {file, contents, ..*self};
+        let pane = Pane {
+            cursors,
+            main_cursor_start,
+            grapheme_col_offset,
+            ..*pane
+        };
+        (buf, vec![pane])
     }
 
     pub fn lines(&self) -> crop::iter::Lines {
         self.contents.lines()
-    }
-
-    pub fn cursors_iter(&self) -> impl DoubleEndedIterator<Item = &Selection> {
-        self.cursors.values()
     }
 }
 
@@ -318,37 +342,43 @@ fn reset_grapheme_col_offset(contents: &Rope, start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn create_buffer(s: &str, cursors: Vec<Selection>) -> TextBuffer {
+    fn create_buffer(s: &str, cursors: Vec<Selection>) -> (TextBuffer, Vec<Pane>) {
         let start = cursors[0].start;
         let contents = Rope::from(s);
         let grapheme_col_offset = reset_grapheme_col_offset(&contents, start);
-        TextBuffer {
-            file: None, 
+        let panes = vec![Pane {
             cursors: cursors.into_iter().map(|s| (s.start, s)).collect(), 
-            contents, 
+            buffer_id: 0,
             main_cursor_start: start,
             grapheme_col_offset,
+            id: 0,
+            y_offset: 0.,
+        }];
+        let buffer = TextBuffer {
+            file: None, 
+            contents, 
             ..Default::default()
-        }
+        };
+        (buffer, panes)
     }
 
     #[test]
     fn test_text_buffer_insertion() {
-        let buffer = create_buffer("abcdefghigh", vec![Selection {start: 1, offset: 1}, Selection {start: 5, offset: 1}, Selection {start: 8, offset: 1}]);
-        let buffer = buffer.insert("xz");
+        let (buffer, panes) = create_buffer("abcdefghigh", vec![Selection {start: 1, offset: 1}, Selection {start: 5, offset: 1}, Selection {start: 8, offset: 1}]);
+        let (buffer, panes) = buffer.insert("xz", panes, vec![0]);
 
         let yee = buffer.contents.chunks().collect::<String>();
 
         // Assert that the buffer is created as expected
         assert_eq!(yee, "axzbcdexzfghxzigh");
-        for (a, b) in buffer.cursors_iter().zip(&[Selection{start: 3, offset: 0}, Selection{start: 9, offset: 0}, Selection{start: 14, offset: 0}]) {
+        for (a, b) in panes[0].cursors_iter().zip(&[Selection{start: 3, offset: 0}, Selection{start: 9, offset: 0}, Selection{start: 14, offset: 0}]) {
             assert_eq!(a, b);
         }
     }
 
     #[test]
     fn test_lines() {
-        let buffer = create_buffer("abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh", vec![Selection {start: 1, offset: 1}, Selection {start: 5, offset: 1}, Selection {start: 8, offset: 1}]);
+        let (buffer, _panes) = create_buffer("abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh", vec![Selection {start: 1, offset: 1}, Selection {start: 5, offset: 1}, Selection {start: 8, offset: 1}]);
         let v = vec!["abcdef", "jfkdsalfjads", "kadsjlfla", "alskdjflasd", "asdjkflsda", "aghigh"];
 
         for (a, b) in buffer.lines().zip(v) {
@@ -361,13 +391,13 @@ mod tests {
     fn test_delete() {
         let cursors = vec![Selection {start: 1, offset: 0}, Selection {start: 5, offset: 0}, Selection {start: 8, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
-        let buffer = create_buffer(s, cursors);
-        let buffer = buffer.backdelete_cursor();
+        let (buffer, panes) = create_buffer(s, cursors);
+        let (buffer, panes) = buffer.backdelete_cursor(panes, vec![0]);
 
         let yee = buffer.contents.chunks().collect::<String>();
 
         assert_eq!(yee, "bcdf\nfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh");
-        for (a, b) in buffer.cursors_iter().zip(&[Selection{start: 0, offset: 0}, Selection{start: 3, offset: 0}, Selection{start: 5, offset: 0}]) {
+        for (a, b) in panes[0].cursors_iter().zip(&[Selection{start: 0, offset: 0}, Selection{start: 3, offset: 0}, Selection{start: 5, offset: 0}]) {
             assert_eq!(a, b);
         }
     }
@@ -376,7 +406,7 @@ mod tests {
     fn test_nowrap_lines() {
         let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
-        let buffer = create_buffer(s, cursors);
+        let (buffer, _panes) = create_buffer(s, cursors);
         let (a, _) = buffer.nowrap_lines(0, 1);
 
         let s = "abcdef\n";
@@ -391,7 +421,7 @@ mod tests {
     fn test_nowrap_lines_snd() {
         let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
-        let buffer = create_buffer(s, cursors);
+        let (buffer, _panes) = create_buffer(s, cursors);
         let (a, _) = buffer.nowrap_lines(1, 3);
 
         let s = "jfkdsalfjads\nkadsjlfla\n";
@@ -407,7 +437,7 @@ mod tests {
         // no newline ending case
         let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
-        let buffer = create_buffer(s, cursors);
+        let (buffer, _panes) = create_buffer(s, cursors);
         let (a, _) = buffer.nowrap_lines(5, 6);
 
         let s = "aghigh";
@@ -420,7 +450,7 @@ mod tests {
         // newline ending case
         let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh\n";
-        let buffer = create_buffer(s, cursors);
+        let (buffer, _panes) = create_buffer(s, cursors);
         let (b, _) = buffer.nowrap_lines(5, 6);
 
         let s = "aghigh\n";
@@ -441,19 +471,19 @@ mod tests {
     }
 }
 
-pub struct BufferList {
-    list: ArcSwap<Vec<TextBuffer>>,
+pub struct SyncList<T> {
+    list: ArcSwap<Vec<T>>,
 }
 
-impl BufferList {
+impl<T> SyncList<T> where T: Clone {
     pub fn new() -> Self {
         Self {
             list: ArcSwap::new(Arc::new(vec![])),
         }
     }
 
-    pub fn store(&self, index: usize, buffer: TextBuffer) {
-        let mut list: Vec<TextBuffer> = (**self.list.load()).to_owned();
+    pub fn store(&self, index: usize, buffer: T) {
+        let mut list: Vec<T> = (**self.list.load()).to_owned();
         if index == list.len() {
             list.push(buffer);
         } else {
@@ -462,33 +492,60 @@ impl BufferList {
         self.list.store(Arc::new(list));
     }
 
-    pub fn get(&self) -> arc_swap::Guard<Arc<Vec<TextBuffer>>> {
-        let x = self.list.load();
-        x
+    pub fn get(&self) -> arc_swap::Guard<Arc<Vec<T>>> {
+        self.list.load()
     }
-    
+
     pub fn len(&self) -> usize {
         self.get().len()
     }
 }
 
-pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<(BufferId, BufferOp)>, buffers: Arc<BufferList>, render_tx: mpsc::Sender<CustomEvent>, event_loop_proxy: EventLoopProxy) -> impl FnOnce() {
+impl SyncList<Pane> {
+    fn involved_panes(&self, buf_id: BufferId) -> Vec<Pane> {
+        self.get().iter().filter(|pane| pane.buffer_id == buf_id).cloned().collect()
+    }
+
+    fn store_all(&self, new_panes: Vec<Pane>) {
+        for pane in new_panes {
+            self.store(pane.id, pane);
+        }
+    }
+}
+
+pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<(BufferOp, Vec<PaneId>)>, buffers: Arc<SyncList<TextBuffer>>, panes: Arc<SyncList<Pane>>, render_tx: mpsc::Sender<CustomEvent>, event_loop_proxy: EventLoopProxy) -> impl FnOnce() {
     move || {
-        while let Ok((buf_id, received)) = buffer_rx.recv() {
-            match received {
+        while let Ok((buf_op, active_panes)) = buffer_rx.recv() {
+            assert!(active_panes.len() == 1);
+            let buf_id = panes.get()[active_panes[0]].buffer_id;
+            match buf_op {
                 BufferOp::Delete => {
-                    buffers.store(buf_id, buffers.get()[buf_id].backdelete_cursor());
+                    let involved_panes = panes.involved_panes(buf_id);
+                    let buffer = &buffers.get()[buf_id];
+                    let (new_buffer, new_panes) = buffer.backdelete_cursor(involved_panes, active_panes);
+                    panes.store_all(new_panes);
+                    buffers.store(buf_id, new_buffer);
                 },
                 BufferOp::Insert(s) => {
                     let buffer = &buffers.get()[buf_id];
-                    buffers.store(buf_id, buffer.insert(&s));
+                    let involved_panes = panes.involved_panes(buf_id);
+                    let (new_buffer, new_panes) = buffer.insert(&s, involved_panes, active_panes);
+                    panes.store_all(new_panes);
+                    buffers.store(buf_id, new_buffer);
                 },
                 BufferOp::MoveHorizontal(n) => {
-                    buffers.store(buf_id, buffers.get()[buf_id].move_horizontal(n));
+                    let buffer = &buffers.get()[buf_id];
+                    let involved_panes = panes.involved_panes(buf_id);
+                    let (new_buffer, new_panes) = buffer.move_horizontal(n, involved_panes, active_panes);
+                    panes.store_all(new_panes);
+                    buffers.store(buf_id, new_buffer);
                 },
                 BufferOp::MoveVertical(n) => {
                     let buffer = buffers.get()[buf_id].clone();
-                    buffers.store(buf_id, buffer.move_vertical(n));
+                    let involved_panes = panes.involved_panes(buf_id);
+                    let (new_buffer, new_panes) = buffer.move_vertical(n, involved_panes, active_panes);
+                    panes.store_all(new_panes);
+                    buffers.store(buf_id, new_buffer);
                 },
                 BufferOp::Save => {
                     let buffer = buffers.get()[buf_id].clone();
@@ -499,30 +556,28 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<(BufferId, BufferOp)>, buffer
                     }
                 },
                 BufferOp::SetMainCursor(i) => { // if mouse is clicked for ex
-                    let buffer = buffers.get()[buf_id].clone();
-                    let mut cursors = buffer.cursors.clone();
-                    let key = &buffer.main_cursor_start;
+                    assert!(active_panes.len() == 1);
+                    let pane = &panes.get()[active_panes[0]];
+                    let mut cursors = pane.cursors.clone();
+                    let key = &pane.main_cursor_start;
                     cursors.remove(key);
                     cursors.insert(i, Selection{start: i, offset: 0});
-                    buffers.store(buf_id, TextBuffer {
+                    let buffer = buffers.get()[buf_id].clone();
+                    panes.store(pane.id, Pane {
                         main_cursor_start: i,
-                        contents: buffer.contents.clone(),
-                        file: buffer.file.clone(),
                         cursors,
                         grapheme_col_offset: reset_grapheme_col_offset(&buffer.contents, i),
-                        
+                        ..*pane
                     });
                 },
                 BufferOp::AddCursor(start) => {
-                    let buffer = buffers.get()[buf_id].clone();
-                    let mut cursors = buffer.cursors.clone();
+                    assert!(active_panes.len() == 1);
+                    let pane = &panes.get()[active_panes[0]];
+                    let mut cursors = pane.cursors.clone();
                     cursors.insert(start, Selection{start, offset: 0});
-                    buffers.store(buf_id, TextBuffer {
-                        main_cursor_start: buffer.main_cursor_start,
-                        contents: buffer.contents.clone(),
-                        file: buffer.file.clone(),
+                    panes.store(pane.id, Pane {
                         cursors,
-                        grapheme_col_offset: buffer.grapheme_col_offset,
+                        ..*pane
                     });
                 },
             }
