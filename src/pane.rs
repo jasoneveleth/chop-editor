@@ -101,10 +101,10 @@ impl Pane {
                     (Mode::Insert, vec![BufferOp::Insert(String::from(s.as_str()))])
                 } else {
                     let char = s.chars().nth(0).unwrap();
-                    if char == 'w' {
-                        (Mode::Insert, vec![BufferOp::Exit])
-                    } else {
-                        (Mode::Insert, vec![])
+                    match char {
+                        'w' => (Mode::Insert, vec![BufferOp::Exit]),
+                        's' => (Mode::Insert, vec![BufferOp::Save]),
+                        _ => (Mode::Insert, vec![])
                     }
                 }
             },
@@ -115,7 +115,6 @@ impl Pane {
     }
 
     pub fn normal(&self, k: Key, mods: &Modifiers) -> (Mode, Vec<BufferOp>) {
-        println!("normal!! {:?}", k);
         match k {
             Key::Named(n) => {
                 match n {
@@ -123,6 +122,7 @@ impl Pane {
                     NamedKey::ArrowRight => (Mode::Normal, vec![BufferOp::MoveHorizontal(1)]),
                     NamedKey::ArrowUp => (Mode::Normal, vec![BufferOp::MoveVertical(-1)]),
                     NamedKey::ArrowDown => (Mode::Normal, vec![BufferOp::MoveVertical(1)]),
+                    NamedKey::Enter => (Mode::Normal, vec![BufferOp::Save]),
                     _ => (Mode::Normal, vec![]),
                 }
             },

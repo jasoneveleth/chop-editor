@@ -87,9 +87,7 @@ impl FontRender {
 
         // y_scroll = start_line * line_height + ~~~~ means next line starts below top of screen
         let start_line = (y_scroll/line_height).floor().max(0.);
-        // (line_nr)*(total_line_height) - y_offset > winow.height means line starts below bottom of screen
-        let last_line = ((self.style.vheight as f32 + y_scroll)/line_height).ceil().min((buffer.num_lines()) as f32);
-        let (graphemes, mut index) = buffer.nowrap_lines(start_line as usize, last_line as usize);
+        let (graphemes, mut index) = buffer.graphemes_from_line(start_line as usize);
 
         // the cache of the top left corner of each glyph; specifically y=ascent, 
         // so the top of most normal capital letters
@@ -121,7 +119,7 @@ impl FontRender {
                     let prev_index = index;
                     index += probably_one;
                     if c != '\n' && pen_x > self.style.vwidth { // if we're off screen just skip
-                        return if line_nr >= (last_line as usize) - 1 {
+                        return if self.style.vheight + y_scroll <= (line_nr as f32) * line_height {
                             // if we're off screen and last line we're done
                             FMTOption::Terminate
                         } else {

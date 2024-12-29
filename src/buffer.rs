@@ -18,7 +18,7 @@ use crate::pane::PaneId;
 
 pub type BufferId = usize;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum BufferOp {
     Insert(String),
     Delete,
@@ -118,10 +118,9 @@ impl TextBuffer {
 
     // lines are 0 indexed
     // end is not included
-    pub fn nowrap_lines(&self, start: usize, end: usize) -> (crop::iter::Graphemes, usize) {
+    pub fn graphemes_from_line(&self, start: usize) -> (crop::iter::Graphemes, usize) {
         let byte_len = self.contents.byte_of_line(start);
-        let byte_len2 = self.contents.byte_of_line(end);
-        let gs = self.contents.byte_slice(byte_len..byte_len2).graphemes();
+        let gs = self.contents.byte_slice(byte_len..).graphemes();
         (gs, byte_len)
     }
 
@@ -344,6 +343,7 @@ fn reset_grapheme_col_offset(contents: &Rope, start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane::Mode;
     fn create_buffer(s: &str, cursors: Vec<Selection>) -> (TextBuffer, Vec<Pane>) {
         let start = cursors[0].start;
         let contents = Rope::from(s);
@@ -410,9 +410,9 @@ mod tests {
         let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
         let (buffer, _panes) = create_buffer(s, cursors);
-        let (a, _) = buffer.nowrap_lines(0, 1);
+        let (a, _) = buffer.graphemes_from_line(0);
 
-        let s = "abcdef\n";
+        let s = s.clone();
         for (a, b) in a.zip(s.chars()) {
             let c: Vec<char> = a.chars().collect();
             assert!(c.len() == 1);
@@ -425,9 +425,9 @@ mod tests {
         let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
         let (buffer, _panes) = create_buffer(s, cursors);
-        let (a, _) = buffer.nowrap_lines(1, 3);
+        let (a, _) = buffer.graphemes_from_line(1);
 
-        let s = "jfkdsalfjads\nkadsjlfla\n";
+        let s = "jfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
         for (a, b) in a.zip(s.chars()) {
             let c: Vec<char> = a.chars().collect();
             assert!(c.len() == 1);
@@ -441,7 +441,7 @@ mod tests {
         let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh";
         let (buffer, _panes) = create_buffer(s, cursors);
-        let (a, _) = buffer.nowrap_lines(5, 6);
+        let (a, _) = buffer.graphemes_from_line(5);
 
         let s = "aghigh";
         for (a, b) in a.zip(s.chars()) {
@@ -454,7 +454,7 @@ mod tests {
         let cursors = vec![Selection{start: 0, offset: 0}];
         let s = "abcdef\njfkdsalfjads\nkadsjlfla\nalskdjflasd\nasdjkflsda\naghigh\n";
         let (buffer, _panes) = create_buffer(s, cursors);
-        let (b, _) = buffer.nowrap_lines(5, 6);
+        let (b, _) = buffer.graphemes_from_line(5);
 
         let s = "aghigh\n";
         for (a, b) in b.zip(s.chars()) {
@@ -551,6 +551,7 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<(BufferOp, Vec<PaneId>)>, buf
                     buffers.store(buf_id, new_buffer);
                 },
                 BufferOp::Save => {
+                    println!("saving");
                     let buffer = buffers.get()[buf_id].clone();
                     let filepath = &buffer.file.as_ref().unwrap().filename;
                     match buffer.write(filepath) {

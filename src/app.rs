@@ -483,6 +483,9 @@ impl<'a> ApplicationHandler for App<'a> {
                     let (new_pane, ops) = pane.key(event.logical_key, &self.mods);
                     let should_redraw = new_pane.mode != pane.mode;
                     for op in ops {
+                        if op == BufferOp::Exit {
+                            event_loop.exit();
+                        }
                         self.buffer_tx.send((op, vec![new_pane.id])).unwrap();
                     }
                     self.panes.store(new_pane.id, new_pane);
