@@ -14,6 +14,7 @@ use std::sync::mpsc;
 use crate::buffer::{TextBuffer, CustomEvent};
 use crate::filter_map::{FMTOption, filter_map_terminate};
 use crate::app::WindowState;
+use crate::pane::Mode;
 use crate::pane::Pane;
 
 pub struct Style {
@@ -232,7 +233,12 @@ pub fn redraw_requested_handler(state: &mut WindowState, buf: &TextBuffer, pane:
             // draw cursor
             let pos = (x as f64 - CURSOR_WIDTH/2., (y - font_render.style.ascent/2.) as f64 - CURSOR_HEIGHT/2.);
             if state.should_draw_cursor {
-                scene.fill(NonZero, Affine::translate(pos), font_render.style.cursor_color, None, &font_render.style.cursor_shape);
+                let color = if pane.mode == Mode::Normal {
+                    font_render.style.color_scheme.get("blue").unwrap()
+                } else {
+                    font_render.style.color_scheme.get("red-1").unwrap()
+                };
+                scene.fill(NonZero, Affine::translate(pos), color, None, &font_render.style.cursor_shape);
             }
             if !c.is_empty() {
                 if let Some(pos) = glyph_pos_cache.get(&c.end()) {

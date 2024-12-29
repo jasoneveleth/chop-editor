@@ -18,10 +18,12 @@ use crate::pane::PaneId;
 
 pub type BufferId = usize;
 
+#[derive(Debug)]
 pub enum BufferOp {
     Insert(String),
     Delete,
     Save,
+    Exit,
     MoveHorizontal(i64),
     MoveVertical(i64),
     SetMainCursor(usize),
@@ -353,6 +355,7 @@ mod tests {
             grapheme_col_offset,
             id: 0,
             y_offset: 0.,
+            mode: Mode::Normal,
         }];
         let buffer = TextBuffer {
             file: None, 
@@ -580,6 +583,8 @@ pub fn buffer_op_handler(buffer_rx: mpsc::Receiver<(BufferOp, Vec<PaneId>)>, buf
                         ..*pane
                     });
                 },
+                BufferOp::Exit => {
+                }
             }
             // TODO: sketchy, we should tell the renderer which buffer to redraw
             if let Err(e) = render_tx.send(CustomEvent::BufferRequestedRedraw(buf_id)) {

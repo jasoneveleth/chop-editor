@@ -25,7 +25,7 @@ use std::num::NonZeroUsize;
 use winit::event::{MouseScrollDelta, ElementState, MouseButton, ButtonSource};
 use winit::window::CursorIcon;
 use winit::window::Cursor;
-use winit::keyboard::{Key, NamedKey, ModifiersKeyState};
+use winit::keyboard::ModifiersKeyState;
 use vello::RendererOptions;
 use vello::kurbo::Rect;
 use vello::util::RenderSurface;
@@ -477,39 +477,17 @@ impl<'a> ApplicationHandler for App<'a> {
                 }
             },
             WindowEvent::KeyboardInput{device_id: _, event, is_synthetic: _} => {
-                log::info!("keyboard input: {:?} {:?}", event.logical_key, event.state);
-
                 if event.state != ElementState::Released {
-                    match event.logical_key {
-                        Key::Character(s) => {
-                            self.cursor_blink_last_key.send(()).unwrap();
-                            // EMOJI
-                            let char = s.chars().nth(0).unwrap();
-                            if char == 'w' && super_pressed(&self.mods) {
-                                event_loop.exit();
-                            } else if char == 's' && super_pressed(&self.mods) {
-                                let active = vec![window_state.layout.pane_id];
-                                self.buffer_tx.send((BufferOp::Save, active)).unwrap();
-                            } else {
-                                let active = vec![window_state.layout.pane_id];
-                                self.buffer_tx.send((BufferOp::Insert(String::from(s.as_str())), active)).unwrap();
-                            }
-                        },
-                        Key::Named(n) => {
-                            self.cursor_blink_last_key.send(()).unwrap();
-                            let active = vec![window_state.layout.pane_id];
-                            match n {
-                                NamedKey::Enter => self.buffer_tx.send((BufferOp::Insert(String::from("\n")), active)).unwrap(),
-                                NamedKey::ArrowLeft => self.buffer_tx.send((BufferOp::MoveHorizontal(-1), active)).unwrap(),
-                                NamedKey::ArrowRight => self.buffer_tx.send((BufferOp::MoveHorizontal(1), active)).unwrap(),
-                                NamedKey::ArrowUp => self.buffer_tx.send((BufferOp::MoveVertical(-1), active)).unwrap(),
-                                NamedKey::ArrowDown => self.buffer_tx.send((BufferOp::MoveVertical(1), active)).unwrap(),
-                                NamedKey::Space => self.buffer_tx.send((BufferOp::Insert(String::from(" ")), active)).unwrap(),
-                                NamedKey::Backspace => self.buffer_tx.send((BufferOp::Delete, active)).unwrap(),
-                                _ => (),
-                            }
-                        }
-                        a => {log::info!("unknown keyboard input: {a:?}");},
+                    self.cursor_blink_last_key.send(()).unwrap();
+                    let pane = &self.panes.get()[window_state.layout.pane_id];
+                    let (new_pane, ops) = pane.key(event.logical_key, &self.mods);
+                    let should_redraw = new_pane.mode != pane.mode;
+                    for op in ops {
+                        self.buffer_tx.send((op, vec![new_pane.id])).unwrap();
+                    }
+                    self.panes.store(new_pane.id, new_pane);
+                    if should_redraw {
+                        window_state.window.request_redraw();
                     }
                 }
             },
@@ -539,10 +517,6 @@ impl<'a> ApplicationHandler for App<'a> {
     fn suspended(&mut self, event_loop: &dyn ActiveEventLoop) {
         let _ = event_loop;
     }
-}
-
-fn super_pressed(m: &Modifiers) -> bool {
-    m.lsuper_state() == ModifiersKeyState::Pressed || m.rsuper_state() == ModifiersKeyState::Pressed
 }
 
 fn extract_urls_from_array(array: &NSArray<NSURL>) -> Vec<String> {
